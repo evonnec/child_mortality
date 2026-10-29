@@ -1,5 +1,6 @@
 """Tests for ``child_mortality.cli`` and the package entry points."""
 
+import errno
 import importlib
 import importlib.metadata
 import runpy
@@ -416,11 +417,14 @@ def test_cli_reports_a_failed_write_and_keeps_the_previous_file(
     assert target.read_text() == "previous"
 
 
-class ClosedPipe:
-    """A stdout whose reader has gone away."""
+class FailingStdout:
+    """A stdout whose writes raise ``error``."""
+
+    def __init__(self, error: OSError) -> None:
+        self.error = error
 
     def write(self, text: str) -> int:
-        raise BrokenPipeError(32, "Broken pipe")
+        raise self.error
 
     def flush(self) -> None:
         raise AssertionError("write fails first")
@@ -429,13 +433,22 @@ class ClosedPipe:
         return 99
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        BrokenPipeError(errno.EPIPE, "Broken pipe"),
+        OSError(errno.EINVAL, "Invalid argument"),  # how Windows reports a closed pipe
+    ],
+    ids=["epipe", "windows-einval"],
+)
 def test_broken_pipe_is_a_quiet_exit(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     generic_csv: Path,
+    error: OSError,
 ) -> None:
     redirected: list[int] = []
-    monkeypatch.setattr(sys, "stdout", ClosedPipe())
+    monkeypatch.setattr(sys, "stdout", FailingStdout(error))
     monkeypatch.setattr("os.dup2", lambda source, target: redirected.append(target))
     code = main(
         ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
@@ -443,6 +456,19 @@ def test_broken_pipe_is_a_quiet_exit(
     assert code == 1
     assert capsys.readouterr().err == ""
     assert redirected == [99]  # stdout now points at the null device
+
+
+def test_other_stdout_errors_are_reported(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    generic_csv: Path,
+) -> None:
+    monkeypatch.setattr(sys, "stdout", FailingStdout(OSError(errno.EIO, "I/O error")))
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    )
+    assert code == 2
+    assert "I/O error" in assert_one_line_error(capsys)
 
 
 def test_detach_stdout_tolerates_a_stdout_without_a_descriptor(
@@ -464,10 +490,13 @@ def test_closed_pipe_prints_nothing_to_stderr(generic_csv: Path) -> None:
         stderr=subprocess.PIPE,
     )  # fmt: skip
     assert process.stdout is not None
+    assert process.stderr is not None
     process.stdout.close()  # the reader exits before the CLI writes
-    _, stderr = process.communicate(timeout=60)
+    # Not communicate(): on Windows its reader thread fails on the stdout we just closed.
+    stderr = process.stderr.read()
+    process.stderr.close()
+    assert process.wait(timeout=60) == 1
     assert stderr == b""
-    assert process.returncode == 1
 
 
 # --- package entry points ------------------------------------------------------------------

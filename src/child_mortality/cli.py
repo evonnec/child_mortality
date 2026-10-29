@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import errno
 import os
 import secrets
 import sys
@@ -105,8 +106,14 @@ def write_cube(cube: pl.DataFrame, output: Path | None) -> None:
     existing ``output`` is replaced.
     """
     if output is None:
-        sys.stdout.write(cube.write_csv())
-        sys.stdout.flush()  # surface a closed pipe here, inside main's handler
+        try:
+            sys.stdout.write(cube.write_csv())
+            sys.stdout.flush()  # surface a closed pipe here, inside main's handler
+        except OSError as exc:
+            # Windows reports a reader that went away as EINVAL rather than EPIPE.
+            if isinstance(exc, BrokenPipeError) or exc.errno == errno.EINVAL:
+                raise BrokenPipeError(errno.EPIPE, "stdout was closed") from exc
+            raise
         return
     temporary = output.with_name(f".{output.name}.{secrets.token_hex(4)}.tmp")
     try:
