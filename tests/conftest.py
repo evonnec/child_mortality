@@ -75,6 +75,11 @@ def naive_cube(
         raise ValueError("null measure")
     if null_measures == "drop":
         records = [rec for rec in records if not incomplete(rec)]
+    if null_measures == "zero":
+        records = [
+            {**rec, **{m: 0 for m in (numerator, denominator) if rec[m] is None}} for rec in records
+        ]
+    # From here no measure is None: a None would fail the sums below rather than count as 0.
     depth = len(dims) if max_dims is None else max_dims
     out: list[Row] = []
     for size in range(1, depth + 1):
@@ -84,8 +89,8 @@ def naive_cube(
                 key = tuple(None if rec[d] is None else str(rec[d]) for d in cut)
                 acc = cells.setdefault(key, [0, 0, 0])
                 acc[0] += 1
-                acc[1] += rec[numerator] or 0
-                acc[2] += rec[denominator] or 0
+                acc[1] += rec[numerator]
+                acc[2] += rec[denominator]
             for key in sorted(cells, key=_sort_key):
                 rows, num, den = cells[key]
                 if rows < min_rows:
