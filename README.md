@@ -222,11 +222,12 @@ docs/             RELEASING.md
 
 ## CI and releases
 
-CI (`.github/workflows/ci.yml`) runs lint, format, type checks, tests and a package build on
-pushes and pull requests. Releases are cut from semver tags (`vX.Y.Z`): `release.yml` verifies
-the tag matches the project version, re-runs checks and tests, builds, and creates a GitHub
-Release. Publishing to PyPI is opt-in (repository variable `PUBLISH_TO_PYPI`). See
-[docs/RELEASING.md](docs/RELEASING.md).
+CI (`.github/workflows/ci.yml`) runs lint, format, type checks, tests (three operating systems
+and the lowest supported polars) and a package build with a wheel smoke test on pushes and pull
+requests. Releases are cut from semver tags (`vX.Y.Z`): `release.yml` verifies the tag matches
+the project version and is on `main`, runs the whole CI workflow on that commit, and creates a
+GitHub Release from the wheel CI tested. Publishing to PyPI is opt-in (repository variable
+`PUBLISH_TO_PYPI`) and needs reviewer approval. See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

@@ -2,6 +2,8 @@ name: CI
 
 # Job graph:
 #   lint, format, typecheck, test, test-polars-floor (parallel) -> build (wheel + sdist, smoke-tested, uploaded as "dist")
+# release.yml calls this workflow (workflow_call) for the tagged commit and releases the "dist"
+# artifact built here, so a release only ships what these jobs checked.
 # Releases and PyPI publishing live only in release.yml.
 #
 # Python: no job passes `python-version` to setup-uv. uv reads `.python-version` itself and
@@ -14,6 +16,13 @@ on:
   # No branch filter: stacked PRs target other PR branches, not just main.
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit SHA to check out (default: the triggering commit)"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -22,6 +31,11 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  # Pinned so the toolchain cannot change underneath uv.lock; Renovate bumps it.
+  # renovate: datasource=github-releases depName=astral-sh/uv
+  UV_VERSION: "0.13.5"
 
 jobs:
   lint:
@@ -33,9 +47,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: auto
           cache-dependency-glob: |
             uv.lock
@@ -56,9 +72,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: auto
           cache-dependency-glob: |
             uv.lock
@@ -77,9 +95,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: auto
           cache-dependency-glob: |
             uv.lock
@@ -105,9 +125,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: auto
           cache-dependency-glob: |
             uv.lock
@@ -135,9 +157,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: auto
           cache-dependency-glob: |
             uv.lock
@@ -171,9 +195,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: ${{ env.UV_VERSION }}
           # Built files are uploaded, so the build never restores a cache.
           enable-cache: false
       - name: Build
