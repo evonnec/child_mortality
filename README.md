@@ -50,13 +50,17 @@ by nine dimensions:
 
 ## Install and quickstart
 
-Requires Python 3.15 and [uv](https://docs.astral.sh/uv/). The only runtime dependency is polars (2.0 or newer; CI tests that floor as well as the locked version).
+Requires Python 3.15 and [uv](https://docs.astral.sh/uv/). The only runtime dependency is polars
+(2.0 or newer; CI tests that floor as well as the locked version).
 
 ```sh
 uv sync
 uv run child-mortality cd-ceb \
     --women data/women.csv --households data/household.csv --max-dims 2 -o out.csv
 ```
+
+This caps cuts at two dimensions over all nine survey dimensions; it is not problem 1. For
+problem 1 (every cut of the first k dimensions), pass those k dimensions with `-d` (see above).
 
 Any CSV works with `ratio-cube`. `-d` is repeatable; `--numerator` and `--denominator` name the
 measure columns; every other column is read as a string, and `NA` or empty values are null:

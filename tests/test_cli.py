@@ -3,6 +3,7 @@
 import errno
 import importlib
 import importlib.metadata
+import os
 import runpy
 import subprocess
 import sys
@@ -435,10 +436,10 @@ class FailingStdout:
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "platform"),
     [
-        BrokenPipeError(errno.EPIPE, "Broken pipe"),
-        OSError(errno.EINVAL, "Invalid argument"),  # how Windows reports a closed pipe
+        (BrokenPipeError(errno.EPIPE, "Broken pipe"), "linux"),
+        (OSError(errno.EINVAL, "Invalid argument"), "win32"),  # how Windows reports a closed pipe
     ],
     ids=["epipe", "windows-einval"],
 )
@@ -447,8 +448,10 @@ def test_broken_pipe_is_a_quiet_exit(
     monkeypatch: pytest.MonkeyPatch,
     generic_csv: Path,
     error: OSError,
+    platform: str,
 ) -> None:
     redirected: list[int] = []
+    monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(sys, "stdout", FailingStdout(error))
     monkeypatch.setattr("os.dup2", lambda source, target: redirected.append(target))
     code = main(
@@ -459,17 +462,29 @@ def test_broken_pipe_is_a_quiet_exit(
     assert redirected == [99]  # stdout now points at the null device
 
 
+@pytest.mark.parametrize(
+    ("error", "platform"),
+    [
+        (OSError(errno.EIO, "I/O error"), "win32"),
+        # EINVAL means a closed pipe only on Windows
+        (OSError(errno.EINVAL, "Invalid argument"), "linux"),
+    ],
+    ids=["eio", "posix-einval"],
+)
 def test_other_stdout_errors_are_reported(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     generic_csv: Path,
+    error: OSError,
+    platform: str,
 ) -> None:
-    monkeypatch.setattr(sys, "stdout", FailingStdout(OSError(errno.EIO, "I/O error")))
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "stdout", FailingStdout(error))
     code = main(
         ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
     )
     assert code == 2
-    assert "I/O error" in assert_one_line_error(capsys)
+    assert str(error.strerror) in assert_one_line_error(capsys)
 
 
 def test_detach_stdout_tolerates_a_stdout_without_a_descriptor(
@@ -484,20 +499,22 @@ def test_detach_stdout_tolerates_a_stdout_without_a_descriptor(
 
 
 def test_closed_pipe_prints_nothing_to_stderr(generic_csv: Path) -> None:
-    process = subprocess.Popen(
-        [sys.executable, "-m", "child_mortality", "ratio-cube", str(generic_csv), "-d", "a",
-         "--numerator", "num", "--denominator", "den"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )  # fmt: skip
-    assert process.stdout is not None
-    assert process.stderr is not None
-    process.stdout.close()  # the reader exits before the CLI writes
-    # Not communicate(): on Windows its reader thread fails on the stdout we just closed.
-    stderr = process.stderr.read()
-    process.stderr.close()
-    assert process.wait(timeout=60) == 1
-    assert stderr == b""
+    read_end, write_end = os.pipe()
+    os.close(read_end)  # the reader is gone before the CLI writes
+    try:
+        # A raw descriptor, not stdout=PIPE: no reader thread, and run() enforces the timeout.
+        result = subprocess.run(
+            [sys.executable, "-m", "child_mortality", "ratio-cube", str(generic_csv), "-d", "a",
+             "--numerator", "num", "--denominator", "den"],
+            stdout=write_end,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )  # fmt: skip
+    finally:
+        os.close(write_end)
+    assert result.stderr == b""
+    assert result.returncode == 1
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and unprivileged symlinks")

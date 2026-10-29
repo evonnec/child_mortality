@@ -112,7 +112,8 @@ def write_cube(cube: pl.DataFrame, output: Path | None) -> None:
             sys.stdout.flush()  # surface a closed pipe here, inside main's handler
         except OSError as exc:
             # Windows reports a reader that went away as EINVAL rather than EPIPE.
-            if isinstance(exc, BrokenPipeError) or exc.errno == errno.EINVAL:
+            windows_closed = sys.platform == "win32" and exc.errno == errno.EINVAL
+            if isinstance(exc, BrokenPipeError) or windows_closed:
                 raise BrokenPipeError(errno.EPIPE, "stdout was closed") from exc
             raise
         return
