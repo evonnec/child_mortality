@@ -7,6 +7,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from child_mortality.cli import main
 from child_mortality.survey import (
     DENOMINATOR,
     DIMENSIONS,
@@ -127,3 +128,28 @@ def test_na_household_values_are_missing_cells(cube3: pl.DataFrame) -> None:
     toilet = cube3.filter(pl.col("cut") == "Type of toilet facility")
     assert toilet["Type of toilet facility"].null_count() <= 1
     assert toilet["rows"].sum() == 8348
+
+
+def test_problem_1_is_every_subset_of_the_first_k_dimensions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Problem 1 for k = 3: 2**3 - 1 = 7 cuts and 555 cells (not ``--max-dims 3``)."""
+    k = 3
+    cube = cd_ceb_cube(WOMEN, HOUSEHOLDS, dimensions=DIMENSIONS[:k])
+    assert cube["cut"].n_unique() == 2**k - 1 == 7
+    assert cube.height == 555
+    assert cube.columns[2 : 2 + k] == list(DIMENSIONS[:k])
+
+    # The same computation from the command line, as documented in the README.
+    argv = ["cd-ceb", "--women", str(WOMEN), "--households", str(HOUSEHOLDS)]
+    for dimension in DIMENSIONS[:k]:
+        argv += ["-d", dimension]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert out == cube.write_csv()
+
+
+def test_max_dims_caps_cut_size_over_all_listed_dimensions(cube3: pl.DataFrame) -> None:
+    """``--max-dims 3`` over all nine dimensions is a different, much larger computation."""
+    assert cube3["cut"].n_unique() == 129
+    assert cube3.height == 75_626

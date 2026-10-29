@@ -1,6 +1,11 @@
 """Command line interface: ``child-mortality cd-ceb`` and ``child-mortality ratio-cube``."""
 
 import argparse
+import contextlib
+import errno
+import os
+import secrets
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -19,6 +24,7 @@ from child_mortality.survey import (
 PROG = "child-mortality"
 EXIT_OK = 0
 EXIT_ERROR = 2
+EXIT_PIPE = 1  # stdout was closed by the reader (``| head``); nothing to report
 _WRITERS = (".csv", ".parquet")
 
 
@@ -30,8 +36,9 @@ class _Parser(argparse.ArgumentParser):
 
 
 def fail(message: str) -> int:
-    """Print a one-line error and return the error exit code."""
-    print(f"{PROG}: error: {message.strip().splitlines()[0]}", file=sys.stderr)
+    """Print a one-line error (the first line of ``message``) and return the error exit code."""
+    lines = message.strip().splitlines()
+    print(f"{PROG}: error: {lines[0] if lines else 'unknown error'}", file=sys.stderr)
     return EXIT_ERROR
 
 
@@ -73,7 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_cube_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--max-dims", type=int, help="largest cut size (default: all dimensions)")
+    parser.add_argument(
+        "--max-dims",
+        type=int,
+        help="largest cut size, over all listed dimensions (default: all of them)",
+    )
     parser.add_argument(
         "--min-rows", type=int, default=1, help="drop cells with fewer rows (default: %(default)s)"
     )
@@ -89,13 +100,52 @@ def read_generic(path: Path, numerator: str, denominator: str) -> pl.LazyFrame:
 
 
 def write_cube(cube: pl.DataFrame, output: Path | None) -> None:
-    """Write the cube to ``output`` (by suffix), or as CSV to stdout."""
+    """Write the cube to ``output`` (by suffix), or as CSV to stdout.
+
+    A file is written under a temporary name in the same directory and then moved into place, so
+    a failed write never leaves a truncated ``output`` and never damages an existing one. An
+    existing ``output`` is replaced.
+    """
     if output is None:
-        sys.stdout.write(cube.write_csv())
-    elif output.suffix.lower() == ".parquet":
-        cube.write_parquet(output)
-    else:
-        cube.write_csv(output)
+        try:
+            sys.stdout.write(cube.write_csv())
+            sys.stdout.flush()  # surface a closed pipe here, inside main's handler
+        except OSError as exc:
+            # Windows reports a reader that went away as EINVAL rather than EPIPE.
+            windows_closed = sys.platform == "win32" and exc.errno == errno.EINVAL
+            if isinstance(exc, BrokenPipeError) or windows_closed:
+                raise BrokenPipeError(errno.EPIPE, "stdout was closed") from exc
+            raise
+        return
+    target = output.resolve()  # replace the file a symlink points at, not the link
+    # Fail the way a plain open() would, naming the user's path rather than the temporary file.
+    if target.is_dir():
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(output))
+    if not target.parent.is_dir():
+        raise FileNotFoundError(errno.ENOENT, "no such directory", str(target.parent))
+    if target.exists() and not os.access(target, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(output))
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        if output.suffix.lower() == ".parquet":
+            cube.write_parquet(temporary)
+        else:
+            cube.write_csv(temporary)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(target, temporary)  # an existing file keeps its permissions
+        temporary.replace(target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _detach_stdout() -> None:
+    """Point stdout at the null device, so the interpreter's exit flush cannot fail again.
+
+    This is the recipe from the Python documentation for ``BrokenPipeError``.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def run(args: argparse.Namespace) -> pl.DataFrame:
@@ -119,13 +169,21 @@ def run(args: argparse.Namespace) -> pl.DataFrame:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI and return the exit code (0 ok, 2 bad arguments, files or data)."""
+    """Run the CLI and return the exit code.
+
+    0 ok, 2 bad arguments, files or data, 1 stdout closed early by the reader.
+    """
     args = build_parser().parse_args(argv)
     output: Path | None = args.output
     if output is not None and output.suffix.lower() not in _WRITERS:
         return fail(f"output must end in .csv or .parquet, got {output.name!r}")
     try:
         write_cube(run(args), output)
+    except BrokenPipeError:
+        _detach_stdout()
+        return EXIT_PIPE
     except ValueError, OSError, pl.exceptions.PolarsError:
-        return fail(str(sys.exception()))
+        exc = sys.exception()
+        assert exc is not None
+        return fail(str(exc).strip() or type(exc).__name__)
     return EXIT_OK

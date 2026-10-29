@@ -4,6 +4,14 @@ name: Release
 # uv normalizes it: v1.2.0a1, v1.2.0b1, v1.2.0rc1 (not v1.2.0-rc.1). The tag must equal
 # "v" + the version in pyproject.toml. Pre-releases become GitHub pre-releases.
 # This is the only workflow that publishes (GitHub Release and, opt-in, PyPI).
+#
+# Job graph (each step must pass before the next starts):
+#   verify    tag is semver, matches the version, and its commit is on main      (contents: read)
+#   ci        ci.yml on that exact commit: lint, format, types, 3-OS tests, polars floor,
+#             wheel contents, installed-wheel smoke test; uploads the "dist" artifact (contents: read)
+#   release   downloads that artifact and creates the GitHub Release  (the only contents: write)
+#   publish-pypi  opt-in; needs reviewer approval on the "pypi" environment
+# Nothing is rebuilt after CI: the files released and published are the files CI smoke-tested.
 
 on:
   push:
@@ -22,25 +30,33 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Pinned so the toolchain cannot change underneath uv.lock; Renovate bumps it.
+  # renovate: datasource=github-releases depName=astral-sh/uv
+  UV_VERSION: "0.13.5"
+
 jobs:
-  release:
-    name: Test, build and create GitHub Release
+  verify:
+    name: Verify tag
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: write # create the release and upload its assets
+    timeout-minutes: 10
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - name: Check out tag
+      - name: Check out tag with full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          # The ancestry check needs origin/main. The token is not kept after checkout.
+          fetch-depth: 0
           persist-credentials: false
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          # Release builds start clean.
+          version: ${{ env.UV_VERSION }}
           enable-cache: false
       - name: Check tag is semver and matches project version
         id: version
@@ -58,29 +74,41 @@ jobs:
           if [[ -n "${BASH_REMATCH[4]}" ]]; then
             echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT"
           fi
-      - name: Install dependencies
-        run: uv sync --locked
-      - name: Run checks
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Check the tagged commit is on main
         run: |
-          uv lock --check
-          uv run ruff check .
-          uv run ruff format --check .
-          uv run mypy src tests
-      - name: Run tests
-        run: uv run pytest
-      - name: Build
-        run: uv build --no-sources
-      - name: Upload dist
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          sha=$(git rev-parse HEAD)
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::Tag $TAG ($sha) is not on main. Merge it to main first, then tag."
+            exit 1
+          fi
+
+  ci:
+    name: CI on the tagged commit
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.verify.outputs.sha }}
+
+  release:
+    name: Create GitHub Release
+    needs: [verify, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release and upload its assets; this job runs no project code
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
-          path: dist/
-          if-no-files-found: error
-          retention-days: 14
+          path: dist
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
         run: |
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
@@ -89,7 +117,7 @@ jobs:
             --verify-tag \
             $PRERELEASE
 
-  # Opt-in. One-time setup is in docs/RELEASING.md. Publishes the exact files built above.
+  # Opt-in. One-time setup is in docs/RELEASING.md. Publishes the exact files CI built.
   publish-pypi:
     name: Publish to PyPI
     if: vars.PUBLISH_TO_PYPI == 'true'

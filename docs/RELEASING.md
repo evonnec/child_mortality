@@ -1,8 +1,10 @@
 # Releasing
 
 Releases are cut from a git tag. Pushing a tag `vX.Y.Z` triggers
-`.github/workflows/release.yml`, which verifies the tag, runs the checks and tests, builds the
-package, and creates a GitHub Release. Optionally it then publishes the same files to PyPI.
+`.github/workflows/release.yml`, which verifies the tag and that its commit is on `main`, runs
+the whole CI workflow on that commit, and creates a GitHub Release from the wheel and sdist CI
+built and smoke-tested. Optionally it then publishes the same files to PyPI after a reviewer
+approves.
 
 ## Versioning policy (SemVer)
 
@@ -45,7 +47,8 @@ pre-releases on GitHub.
    For a pre-release, combine bumps: `uv version --bump minor --bump alpha` (gives
    `0.2.0a1`), then `uv version --bump alpha` for `a2`, or `uv version --bump beta` /
    `--bump rc` to advance the stage. `uv version 1.0.0rc1` sets it explicitly.
-2. Merge that PR first, and make sure CI is green on `main`. Never tag an unmerged commit.
+2. Merge that PR first, and make sure CI is green on `main`. Never tag an unmerged commit: the
+   release workflow fails before building if the tagged commit is not an ancestor of `main`.
 3. Pull `main` and confirm the version:
 
    ```sh
@@ -59,21 +62,45 @@ pre-releases on GitHub.
    git push origin vX.Y.Z
    ```
 5. Watch the Release workflow (Actions tab, or `gh run watch`). It fails early if the tag is
-   not semver or does not equal `v` plus the project version.
+   not semver, does not equal `v` plus the project version, or is not on `main`. If PyPI
+   publishing is enabled, approve the pending `pypi` deployment when prompted.
 
 The workflow can also be run manually (Actions, Release, Run workflow) with the name of an
 existing tag.
 
 ## What the workflow does
 
-1. Checks out the tag and installs locked dependencies; Python comes from `.python-version`.
-2. Fails if the tag is not `vMAJOR.MINOR.PATCH[aN|bN|rcN]` or differs from `v` + `uv version --short`.
-3. Runs lock, lint, format and type checks and the test suite, then `uv build` (sdist and wheel).
-4. Uploads `dist/` as a workflow artifact and creates a GitHub Release with generated notes and
-   the dist files attached. Pre-releases are marked as such.
-5. If the repository variable `PUBLISH_TO_PYPI` is `true`: the `publish-pypi` job downloads that
-   same artifact and publishes it with `pypa/gh-action-pypi-publish` using trusted
-   publishing. Nothing is rebuilt. Until you set the variable, the job is skipped.
+Four jobs run in order; a failure stops the rest.
+
+1. `verify` (`contents: read`): checks out the tag with full history. Fails if the tag is not
+   `vMAJOR.MINOR.PATCH[aN|bN|rcN]`, differs from `v` + `uv version --short`, or points at a commit
+   that is not an ancestor of `origin/main`. Nothing is built or installed for a bad tag.
+2. `ci` (`contents: read`): calls `ci.yml` as a reusable workflow on the tagged commit. That is
+   lint, lockfile, format and type checks, tests on Linux, macOS and Windows, tests at the lowest
+   supported polars, then the build job: it builds the sdist and wheel, checks the wheel contents
+   (`py.typed` present, no `tests/` or `data/`), installs the wheel in a fresh venv and runs the CLI,
+   and uploads `dist/`. A wheel that fails any of this cannot be released.
+3. `release` (the only job with `contents: write`): downloads that `dist/` artifact and creates the
+   GitHub Release with generated notes and the files attached. Pre-releases are marked as such. It
+   runs no project code: no dependency install, no tests, no build.
+4. If the repository variable `PUBLISH_TO_PYPI` is `true`: `publish-pypi` waits for approval on the
+   `pypi` environment, then publishes the same artifact with `pypa/gh-action-pypi-publish` using
+   trusted publishing. Nothing is rebuilt. Until you set the variable, the job is skipped.
+
+The uv version is pinned in `ci.yml` and `release.yml` (`UV_VERSION`; Renovate bumps both).
+
+## Repository settings that back the workflow
+
+Workflow checks run only after a tag exists, so also restrict who can create tags:
+
+- Settings, Rules, Rulesets: add a tag ruleset for the pattern `v*` that restricts creation (and
+  blocks deletion and updates) to maintainers. This is required: for a tag push GitHub runs the
+  `release.yml` stored in the tagged commit, so the `main` check stops mistakes, not someone with
+  write access acting deliberately.
+- Settings, Environments, `pypi`: **Required reviewers must be enabled** (at least one person
+  other than whoever pushes the tag, where the team size allows). This is what stops a single
+  stolen or mistaken tag push from publishing an immutable PyPI release. Also limit its deployment
+  branches and tags to `main` and `v*`, and keep the PyPI trusted publisher bound to `pypi`.
 
 ## Publishing to PyPI (one-time setup)
 
@@ -87,7 +114,8 @@ Publishing (OIDC), so no API token is stored.
    project name `child-mortality`, owner `evonnec`, repository `child_mortality`, workflow
    `release.yml`, environment `pypi`. The first successful publish creates the project.
 3. In the GitHub repo, Settings, Environments, create an environment named `pypi`.
-   Optionally add required approvers to the environment, so each publish waits for a manual approval.
+   Add required reviewers to the environment (required, not optional), so each publish waits for
+   a manual approval. Also add the `v*` tag ruleset described above.
 4. Enable the job:
 
    ```sh

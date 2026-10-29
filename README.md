@@ -14,8 +14,24 @@ A *cut* is a subset of the dimensions; a *cell* is one combination of values wit
 problems are solved:
 
 1. **Full cube.** For the first `k` dimensions, compute the ratio for every cell of every cut of
-   size 1..`k` (every subset of the dimensions, every value combination that occurs in the data).
-   There is no grand-total row.
+   size 1..`k` (every non-empty subset of those `k` dimensions, every value combination that
+   occurs in the data). There is no grand-total row. Pass only those `k` dimensions and leave
+   `--max-dims` unset. On the survey data with k = 3 (`Age in 5-year groups`,
+   `Type of place of residence`, `Number of household members`) this gives 7 cuts and 555 cells:
+
+   ```sh
+   uv run child-mortality cd-ceb --women data/women.csv --households data/household.csv \
+       -d "Age in 5-year groups" -d "Type of place of residence" \
+       -d "Number of household members" -o problem1.csv
+   ```
+
+   ```python
+   cube = ratio_cube(df, dims[:3], numerator, denominator)
+   # survey: cd_ceb_cube(women, households, dimensions=DIMENSIONS[:3])
+   ```
+
+   `--max-dims` is not the same thing: it caps the cut size over *all* listed dimensions.
+   `cd-ceb --max-dims 3` with the default nine dimensions is 129 cuts and 75,626 cells.
 2. **Thresholded ("iceberg") cube.** With many dimensions the number of cuts and cells explodes,
    so return only cells that contain at least `min_rows` input rows, and avoid computing the rest.
    A finer cell never has more rows than a coarser cell that contains it, so whole branches can
@@ -34,13 +50,17 @@ by nine dimensions:
 
 ## Install and quickstart
 
-Requires Python 3.15 and [uv](https://docs.astral.sh/uv/). The only runtime dependency is polars.
+Requires Python 3.15 and [uv](https://docs.astral.sh/uv/). The only runtime dependency is polars
+(2.0 or newer; CI tests that floor as well as the locked version).
 
 ```sh
 uv sync
 uv run child-mortality cd-ceb \
     --women data/women.csv --households data/household.csv --max-dims 2 -o out.csv
 ```
+
+This caps cuts at two dimensions over all nine survey dimensions; it is not problem 1. For
+problem 1 (every cut of the first k dimensions), pass those k dimensions with `-d` (see above).
 
 Any CSV works with `ratio-cube`. `-d` is repeatable; `--numerator` and `--denominator` name the
 measure columns; every other column is read as a string, and `NA` or empty values are null:
@@ -55,12 +75,13 @@ CLI summary (`child-mortality --help` for all flags):
 | Option | Meaning |
 | --- | --- |
 | `-d/--dimension` | Dimension column, repeatable. Required for `ratio-cube`; `cd-ceb` defaults to the nine survey dimensions. |
-| `--max-dims N` | Largest cut size (default: all dimensions). |
+| `--max-dims N` | Largest cut size, over all listed dimensions (default: all of them). Not "the first N dimensions"; to cut by the first N, list only those with `-d`. |
 | `--min-rows N` | Keep only cells with at least N rows (default 1). |
-| `-o/--output` | `.csv` or `.parquet` by suffix; omitted: CSV on stdout. |
+| `-o/--output` | `.csv` or `.parquet` by suffix; omitted: CSV on stdout. An existing file is replaced; the new file is written under a temporary name and moved into place, so a failed write leaves the old file intact. |
 
 Errors (bad arguments, missing files, invalid data) print one line, `child-mortality: error: ...`,
-to stderr and exit with code 2. `python -m child_mortality` is equivalent to the console script.
+to stderr and exit with code 2. If the reader of stdout closes early (`... | head`), the CLI exits
+quietly with code 1. `python -m child_mortality` is equivalent to the console script.
 
 ### Library
 
@@ -205,11 +226,12 @@ docs/             RELEASING.md
 
 ## CI and releases
 
-CI (`.github/workflows/ci.yml`) runs lint, format, type checks, tests and a package build on
-pushes and pull requests. Releases are cut from semver tags (`vX.Y.Z`): `release.yml` verifies
-the tag matches the project version, re-runs checks and tests, builds, and creates a GitHub
-Release. Publishing to PyPI is opt-in (repository variable `PUBLISH_TO_PYPI`). See
-[docs/RELEASING.md](docs/RELEASING.md).
+CI (`.github/workflows/ci.yml`) runs lint, format, type checks, tests (three operating systems
+and the lowest supported polars) and a package build with a wheel smoke test on pushes and pull
+requests. Releases are cut from semver tags (`vX.Y.Z`): `release.yml` verifies the tag matches
+the project version and is on `main`, runs the whole CI workflow on that commit, and creates a
+GitHub Release from the wheel CI tested. Publishing to PyPI is opt-in (repository variable
+`PUBLISH_TO_PYPI`) and needs reviewer approval. See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

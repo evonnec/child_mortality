@@ -1,7 +1,9 @@
 """Tests for ``child_mortality.cli`` and the package entry points."""
 
+import errno
 import importlib
 import importlib.metadata
+import os
 import runpy
 import subprocess
 import sys
@@ -12,7 +14,7 @@ import pytest
 
 import child_mortality
 from child_mortality import __version__, cd_ceb_cube, ratio_cube
-from child_mortality.cli import build_parser, fail, main, read_generic, write_cube
+from child_mortality.cli import _detach_stdout, build_parser, fail, main, read_generic, write_cube
 from conftest import write_csv
 
 DIM = "Type of place of residence"
@@ -336,11 +338,12 @@ def test_fail_keeps_only_the_first_line(capsys: pytest.CaptureFixture[str]) -> N
     assert capsys.readouterr().err == "child-mortality: error: first\n"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: fail() indexes splitlines()[0], so an error with an empty message raises "
-    "IndexError (traceback) instead of exiting 2",
-)
+def test_fail_with_an_empty_message(capsys: pytest.CaptureFixture[str]) -> None:
+    assert fail("") == 2
+    assert fail("  \n") == 2
+    assert capsys.readouterr().err == "child-mortality: error: unknown error\n" * 2
+
+
 def test_error_with_empty_message_is_still_a_clean_exit(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,7 +352,225 @@ def test_error_with_empty_message_is_still_a_clean_exit(
 
     monkeypatch.setattr("child_mortality.cli.cd_ceb_cube", boom)
     assert main(["cd-ceb", "--women", "w.csv", "--households", "h.csv"]) == 2
-    assert capsys.readouterr().err.count("\n") == 1
+    err = capsys.readouterr().err
+    assert err == "child-mortality: error: ValueError\n"
+
+
+# --- output files and pipes ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["o.csv", "o.parquet"])
+def test_write_cube_leaves_no_temporary_files(tmp_path: Path, name: str) -> None:
+    write_cube(pl.DataFrame({"x": [1]}), tmp_path / name)
+    assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+@pytest.mark.parametrize("name", ["o.csv", "o.parquet"])
+def test_write_cube_replaces_an_existing_file(tmp_path: Path, name: str) -> None:
+    target = tmp_path / name
+    write_cube(pl.DataFrame({"x": [1]}), target)
+    new = pl.DataFrame({"x": [2, 3]})
+    write_cube(new, target)
+    read = pl.read_parquet if name.endswith(".parquet") else pl.read_csv
+    assert read(target).equals(new)
+    assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+@pytest.mark.parametrize("name", ["o.csv", "o.parquet"])
+def test_failed_write_keeps_the_previous_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    target = tmp_path / name
+    target.write_bytes(b"previous")
+
+    def fail_midway(self: pl.DataFrame, file: Path) -> None:
+        file.write_bytes(b"trunc")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_csv", fail_midway)
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", fail_midway)
+    cube = pl.DataFrame({"x": [1]})
+    with pytest.raises(OSError, match="disk full"):
+        write_cube(cube, target)
+    assert target.read_bytes() == b"previous"
+    assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+def test_cli_reports_a_failed_write_and_keeps_the_previous_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    generic_csv: Path,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "out.csv"
+    target.write_text("previous")
+
+    def fail_midway(self: pl.DataFrame, file: Path) -> None:
+        file.write_text("trunc")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_csv", fail_midway)
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den",
+         "-o", str(target)]
+    )  # fmt: skip
+    assert code == 2
+    assert "disk full" in assert_one_line_error(capsys)
+    assert target.read_text() == "previous"
+
+
+class FailingStdout:
+    """A stdout whose writes raise ``error``."""
+
+    def __init__(self, error: OSError) -> None:
+        self.error = error
+
+    def write(self, text: str) -> int:
+        raise self.error
+
+    def flush(self) -> None:
+        raise AssertionError("write fails first")
+
+    def fileno(self) -> int:
+        return 99
+
+
+@pytest.mark.parametrize(
+    ("error", "platform"),
+    [
+        (BrokenPipeError(errno.EPIPE, "Broken pipe"), "linux"),
+        (OSError(errno.EINVAL, "Invalid argument"), "win32"),  # how Windows reports a closed pipe
+    ],
+    ids=["epipe", "windows-einval"],
+)
+def test_broken_pipe_is_a_quiet_exit(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    generic_csv: Path,
+    error: OSError,
+    platform: str,
+) -> None:
+    redirected: list[int] = []
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "stdout", FailingStdout(error))
+    monkeypatch.setattr("os.dup2", lambda source, target: redirected.append(target))
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    )
+    assert code == 1
+    assert capsys.readouterr().err == ""
+    assert redirected == [99]  # stdout now points at the null device
+
+
+@pytest.mark.parametrize(
+    ("error", "platform"),
+    [
+        (OSError(errno.EIO, "I/O error"), "win32"),
+        # EINVAL means a closed pipe only on Windows
+        (OSError(errno.EINVAL, "Invalid argument"), "linux"),
+    ],
+    ids=["eio", "posix-einval"],
+)
+def test_other_stdout_errors_are_reported(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    generic_csv: Path,
+    error: OSError,
+    platform: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "stdout", FailingStdout(error))
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    )
+    assert code == 2
+    assert str(error.strerror) in assert_one_line_error(capsys)
+
+
+def test_detach_stdout_tolerates_a_stdout_without_a_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoFileno:
+        def fileno(self) -> int:
+            raise ValueError("no descriptor")
+
+    monkeypatch.setattr(sys, "stdout", NoFileno())
+    _detach_stdout()
+
+
+def test_closed_pipe_prints_nothing_to_stderr(generic_csv: Path) -> None:
+    read_end, write_end = os.pipe()
+    os.close(read_end)  # the reader is gone before the CLI writes
+    try:
+        # A raw descriptor, not stdout=PIPE: no reader thread, and run() enforces the timeout.
+        result = subprocess.run(
+            [sys.executable, "-m", "child_mortality", "ratio-cube", str(generic_csv), "-d", "a",
+             "--numerator", "num", "--denominator", "den"],
+            stdout=write_end,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )  # fmt: skip
+    finally:
+        os.close(write_end)
+    assert result.stderr == b""
+    assert result.returncode == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and unprivileged symlinks")
+def test_write_follows_a_symlink_and_keeps_permissions(tmp_path: Path) -> None:
+    real = tmp_path / "real.csv"
+    real.write_text("previous")
+    real.chmod(0o600)
+    link = tmp_path / "link.csv"
+    link.symlink_to(real)
+    write_cube(pl.DataFrame({"x": [1]}), link)
+    assert link.is_symlink()
+    assert pl.read_csv(real).equals(pl.DataFrame({"x": [1]}))
+    assert real.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("name", ["missing_dir/out.csv", "a_dir.csv"])
+def test_output_errors_name_the_output_not_the_temporary_file(
+    capsys: pytest.CaptureFixture[str], generic_csv: Path, tmp_path: Path, name: str
+) -> None:
+    (tmp_path / "a_dir.csv").mkdir()
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den",
+         "-o", str(tmp_path / name)]
+    )  # fmt: skip
+    assert code == 2
+    message = assert_one_line_error(capsys)
+    assert ".tmp" not in message
+    # OSError shows the path's repr (backslashes doubled on Windows), so match the user's leaf name.
+    assert Path(name).parts[0] in message
+
+
+def test_a_read_only_output_is_not_replaced(tmp_path: Path) -> None:
+    target = tmp_path / "ro.csv"
+    target.write_text("previous")
+    target.chmod(0o444)
+    cube = pl.DataFrame({"x": [1]})
+    try:
+        with pytest.raises(PermissionError):
+            write_cube(cube, target)
+        assert target.read_text() == "previous"
+    finally:
+        target.chmod(0o644)
+
+
+def test_whitespace_only_error_message_names_the_exception(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, generic_csv: Path
+) -> None:
+    def raise_blank(*args: object, **kwargs: object) -> pl.DataFrame:
+        raise ValueError("   ")
+
+    monkeypatch.setattr("child_mortality.cli.ratio_cube", raise_blank)
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    )
+    assert code == 2
+    assert "ValueError" in assert_one_line_error(capsys)
 
 
 # --- package entry points ------------------------------------------------------------------
