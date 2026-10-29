@@ -117,21 +117,20 @@ def apply_null_policy(
 ) -> pl.LazyFrame:
     """Apply ``null_measures`` to the measure columns: raise, drop incomplete rows or fill 0.
 
+    The error names each measure with nulls, its null count and its first null row, a 1-based
+    position in ``data`` (for a CSV, the data row, not counting the header).
+
     Raises:
         ValueError: if the policy is unknown, or it is ``"error"`` and a measure has nulls.
     """
     if null_measures not in _NULL_POLICIES:
         raise ValueError(f"null_measures must be one of {_NULL_POLICIES}, got {null_measures!r}")
-    # "row" is the 1-based position in the input.
+    measures = tuple(dict.fromkeys(measures))  # the numerator may also be the denominator
+    # No row-index column, so no clash with a measure of that name; arg_true is 0-based.
     stats = (
-        data.select(*measures)
-        .with_row_index("row", offset=1)
-        .select(
+        data.select(
             *[pl.col(m).is_null().sum().alias(f"{m}.count") for m in measures],
-            *[
-                pl.col("row").filter(pl.col(m).is_null()).min().alias(f"{m}.first")
-                for m in measures
-            ],
+            *[(pl.col(m).is_null().arg_true().min() + 1).alias(f"{m}.first") for m in measures],
             pl.any_horizontal(pl.col(*measures).is_null()).sum().alias("affected"),
         )
         .collect()

@@ -350,6 +350,21 @@ def test_complete_data_is_the_same_under_every_policy(caplog: pytest.LogCaptureF
     assert not caplog.records
 
 
+@pytest.mark.parametrize("policy", POLICIES)
+def test_null_policy_allows_one_column_as_both_measures_and_a_measure_named_row(
+    policy: NullMeasures,
+) -> None:
+    df = pl.DataFrame({"a": ["x", "x", "y"], "row": [1, 3, 0]})
+    cube = ratio_cube(df, ["a"], "row", "row", null_measures=policy)
+    assert cube.rows() == [(1, "a", "x", 2, 4.0, 4.0, 1.0), (1, "a", "y", 1, 0.0, 0.0, None)]
+
+
+def test_error_policy_reports_the_first_null_row_of_a_column_named_row() -> None:
+    df = pl.DataFrame({"a": ["x"] * 3, "row": [1, None, 2], "d": [1, 1, 1]})
+    with pytest.raises(ValueError, match=r"^column 'row' has 1 null rows \(first at row 2\);"):
+        ratio_cube(df, ["a"], "row", "d")
+
+
 def test_unknown_null_policy_is_a_value_error() -> None:
     with pytest.raises(ValueError, match="null_measures"):
         ratio_cube(tiny(), ["a"], "num", "den", null_measures="ignore")  # type: ignore[arg-type]
