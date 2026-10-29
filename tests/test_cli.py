@@ -12,7 +12,7 @@ import pytest
 
 import child_mortality
 from child_mortality import __version__, cd_ceb_cube, ratio_cube
-from child_mortality.cli import build_parser, fail, main, read_generic, write_cube
+from child_mortality.cli import _detach_stdout, build_parser, fail, main, read_generic, write_cube
 from conftest import write_csv
 
 DIM = "Type of place of residence"
@@ -336,11 +336,12 @@ def test_fail_keeps_only_the_first_line(capsys: pytest.CaptureFixture[str]) -> N
     assert capsys.readouterr().err == "child-mortality: error: first\n"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: fail() indexes splitlines()[0], so an error with an empty message raises "
-    "IndexError (traceback) instead of exiting 2",
-)
+def test_fail_with_an_empty_message(capsys: pytest.CaptureFixture[str]) -> None:
+    assert fail("") == 2
+    assert fail("  \n") == 2
+    assert capsys.readouterr().err == "child-mortality: error: unknown error\n" * 2
+
+
 def test_error_with_empty_message_is_still_a_clean_exit(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,7 +350,124 @@ def test_error_with_empty_message_is_still_a_clean_exit(
 
     monkeypatch.setattr("child_mortality.cli.cd_ceb_cube", boom)
     assert main(["cd-ceb", "--women", "w.csv", "--households", "h.csv"]) == 2
-    assert capsys.readouterr().err.count("\n") == 1
+    err = capsys.readouterr().err
+    assert err == "child-mortality: error: ValueError\n"
+
+
+# --- output files and pipes ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["o.csv", "o.parquet"])
+def test_write_cube_leaves_no_temporary_files(tmp_path: Path, name: str) -> None:
+    write_cube(pl.DataFrame({"x": [1]}), tmp_path / name)
+    assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+@pytest.mark.parametrize("name", ["o.csv", "o.parquet"])
+def test_write_cube_replaces_an_existing_file(tmp_path: Path, name: str) -> None:
+    target = tmp_path / name
+    write_cube(pl.DataFrame({"x": [1]}), target)
+    new = pl.DataFrame({"x": [2, 3]})
+    write_cube(new, target)
+    read = pl.read_parquet if name.endswith(".parquet") else pl.read_csv
+    assert read(target).equals(new)
+    assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+@pytest.mark.parametrize("name", ["o.csv", "o.parquet"])
+def test_failed_write_keeps_the_previous_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    target = tmp_path / name
+    target.write_bytes(b"previous")
+
+    def fail_midway(self: pl.DataFrame, file: Path) -> None:
+        file.write_bytes(b"trunc")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_csv", fail_midway)
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", fail_midway)
+    with pytest.raises(OSError, match="disk full"):
+        write_cube(pl.DataFrame({"x": [1]}), target)
+    assert target.read_bytes() == b"previous"
+    assert [path.name for path in tmp_path.iterdir()] == [name]
+
+
+def test_cli_reports_a_failed_write_and_keeps_the_previous_file(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    generic_csv: Path,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "out.csv"
+    target.write_text("previous")
+
+    def fail_midway(self: pl.DataFrame, file: Path) -> None:
+        file.write_text("trunc")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_csv", fail_midway)
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den",
+         "-o", str(target)]
+    )  # fmt: skip
+    assert code == 2
+    assert "disk full" in assert_one_line_error(capsys)
+    assert target.read_text() == "previous"
+
+
+class ClosedPipe:
+    """A stdout whose reader has gone away."""
+
+    def write(self, text: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        raise AssertionError("write fails first")
+
+    def fileno(self) -> int:
+        return 99
+
+
+def test_broken_pipe_is_a_quiet_exit(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    generic_csv: Path,
+) -> None:
+    redirected: list[int] = []
+    monkeypatch.setattr(sys, "stdout", ClosedPipe())
+    monkeypatch.setattr("os.dup2", lambda source, target: redirected.append(target))
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    )
+    assert code == 1
+    assert capsys.readouterr().err == ""
+    assert redirected == [99]  # stdout now points at the null device
+
+
+def test_detach_stdout_tolerates_a_stdout_without_a_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoFileno:
+        def fileno(self) -> int:
+            raise ValueError("no descriptor")
+
+    monkeypatch.setattr(sys, "stdout", NoFileno())
+    _detach_stdout()
+
+
+def test_closed_pipe_prints_nothing_to_stderr(generic_csv: Path) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "child_mortality", "ratio-cube", str(generic_csv), "-d", "a",
+         "--numerator", "num", "--denominator", "den"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )  # fmt: skip
+    assert process.stdout is not None
+    process.stdout.close()  # the reader exits before the CLI writes
+    _, stderr = process.communicate(timeout=60)
+    assert stderr == b""
+    assert process.returncode == 1
 
 
 # --- package entry points ------------------------------------------------------------------

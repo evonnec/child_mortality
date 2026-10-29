@@ -1,6 +1,9 @@
 """Command line interface: ``child-mortality cd-ceb`` and ``child-mortality ratio-cube``."""
 
 import argparse
+import contextlib
+import os
+import secrets
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -19,6 +22,7 @@ from child_mortality.survey import (
 PROG = "child-mortality"
 EXIT_OK = 0
 EXIT_ERROR = 2
+EXIT_PIPE = 1  # stdout was closed by the reader (``| head``); nothing to report
 _WRITERS = (".csv", ".parquet")
 
 
@@ -30,8 +34,9 @@ class _Parser(argparse.ArgumentParser):
 
 
 def fail(message: str) -> int:
-    """Print a one-line error and return the error exit code."""
-    print(f"{PROG}: error: {message.strip().splitlines()[0]}", file=sys.stderr)
+    """Print a one-line error (the first line of ``message``) and return the error exit code."""
+    lines = message.strip().splitlines()
+    print(f"{PROG}: error: {lines[0] if lines else 'unknown error'}", file=sys.stderr)
     return EXIT_ERROR
 
 
@@ -93,13 +98,35 @@ def read_generic(path: Path, numerator: str, denominator: str) -> pl.LazyFrame:
 
 
 def write_cube(cube: pl.DataFrame, output: Path | None) -> None:
-    """Write the cube to ``output`` (by suffix), or as CSV to stdout."""
+    """Write the cube to ``output`` (by suffix), or as CSV to stdout.
+
+    A file is written under a temporary name in the same directory and then moved into place, so
+    a failed write never leaves a truncated ``output`` and never damages an existing one. An
+    existing ``output`` is replaced.
+    """
     if output is None:
         sys.stdout.write(cube.write_csv())
-    elif output.suffix.lower() == ".parquet":
-        cube.write_parquet(output)
-    else:
-        cube.write_csv(output)
+        sys.stdout.flush()  # surface a closed pipe here, inside main's handler
+        return
+    temporary = output.with_name(f".{output.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        if output.suffix.lower() == ".parquet":
+            cube.write_parquet(temporary)
+        else:
+            cube.write_csv(temporary)
+        temporary.replace(output)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _detach_stdout() -> None:
+    """Point stdout at the null device, so the interpreter's exit flush cannot fail again.
+
+    This is the recipe from the Python documentation for ``BrokenPipeError``.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 def run(args: argparse.Namespace) -> pl.DataFrame:
@@ -123,13 +150,21 @@ def run(args: argparse.Namespace) -> pl.DataFrame:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI and return the exit code (0 ok, 2 bad arguments, files or data)."""
+    """Run the CLI and return the exit code.
+
+    0 ok, 2 bad arguments, files or data, 1 stdout closed early by the reader.
+    """
     args = build_parser().parse_args(argv)
     output: Path | None = args.output
     if output is not None and output.suffix.lower() not in _WRITERS:
         return fail(f"output must end in .csv or .parquet, got {output.name!r}")
     try:
         write_cube(run(args), output)
+    except BrokenPipeError:
+        _detach_stdout()
+        return EXIT_PIPE
     except ValueError, OSError, pl.exceptions.PolarsError:
-        return fail(str(sys.exception()))
+        exc = sys.exception()
+        assert exc is not None
+        return fail(str(exc) or type(exc).__name__)
     return EXIT_OK

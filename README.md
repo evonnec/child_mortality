@@ -73,10 +73,11 @@ CLI summary (`child-mortality --help` for all flags):
 | `-d/--dimension` | Dimension column, repeatable. Required for `ratio-cube`; `cd-ceb` defaults to the nine survey dimensions. |
 | `--max-dims N` | Largest cut size, over all listed dimensions (default: all of them). Not "the first N dimensions"; to cut by the first N, list only those with `-d`. |
 | `--min-rows N` | Keep only cells with at least N rows (default 1). |
-| `-o/--output` | `.csv` or `.parquet` by suffix; omitted: CSV on stdout. |
+| `-o/--output` | `.csv` or `.parquet` by suffix; omitted: CSV on stdout. An existing file is replaced; the new file is written under a temporary name and moved into place, so a failed write leaves the old file intact. |
 
 Errors (bad arguments, missing files, invalid data) print one line, `child-mortality: error: ...`,
-to stderr and exit with code 2. `python -m child_mortality` is equivalent to the console script.
+to stderr and exit with code 2. If the reader of stdout closes early (`... | head`), the CLI exits
+quietly with code 1. `python -m child_mortality` is equivalent to the console script.
 
 ### Library
 
