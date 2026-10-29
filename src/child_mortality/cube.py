@@ -2,7 +2,6 @@
 
 import logging
 from collections.abc import Sequence
-from itertools import combinations
 from typing import Literal, get_args
 
 lazy import polars as pl
@@ -15,6 +14,9 @@ type NullMeasures = Literal["error", "drop", "zero"]
 _NULL_POLICIES = get_args(NullMeasures.__value__)
 
 logger = logging.getLogger(__name__)
+
+# A cut as ascending indices into the dimension list.
+type Node = tuple[int, ...]
 
 CUT_SEPARATOR = "|"
 _MEASURES = ("rows", "numerator", "denominator")
@@ -60,23 +62,11 @@ def ratio_cube(
     if finest.is_empty() or min_rows > finest["rows"].sum():
         return empty_cube(dims)
 
-    parts: list[pl.DataFrame] = []
-    frequent: dict[Cut, pl.DataFrame] = {}  # previous level: cut -> keys of its frequent cells
-    for size in range(1, depth + 1):
-        current: dict[Cut, pl.DataFrame] = {}
-        for cut in combinations(dims, size):
-            source = finest if min_rows == 1 else restrict_to_frequent(finest, cut, frequent)
-            if source is None:
-                continue
-            cells = roll_up(source, cut).filter(pl.col("rows") >= min_rows)
-            if cells.is_empty():
-                continue
-            parts.append(format_cells(order_cells(cells, cut), cut, dims))
-            current[cut] = cells.select(cut)
-        frequent = current
-        if min_rows > 1 and not frequent:
-            break  # no frequent cell at this level, so none at any deeper level
-    return pl.concat(parts) if parts else empty_cube(dims)
+    parts = walk_cuts(finest, dims, depth, min_rows)
+    if not parts:
+        return empty_cube(dims)
+    # Documented order: cut size, then itertools.combinations(dims, k) order (ascending indices).
+    return pl.concat([parts[node] for node in sorted(parts, key=lambda n: (len(n), n))])
 
 
 def validate_inputs(
@@ -190,25 +180,49 @@ def roll_up(source: pl.DataFrame, cut: Cut) -> pl.DataFrame:
     return source.group_by(cut).agg(pl.col(*_MEASURES).sum())
 
 
-def restrict_to_frequent(
-    finest: pl.DataFrame, cut: Cut, frequent: dict[Cut, pl.DataFrame]
-) -> pl.DataFrame | None:
-    """Keep finest-grain groups whose every (k-1)-sub-cell is frequent (iceberg pruning).
+def restrict_to_cells(source: pl.DataFrame, cut: Cut, cells: pl.DataFrame) -> pl.DataFrame:
+    """Keep the rows of ``source`` inside the cut's frequent ``cells`` (iceberg pruning).
 
-    Row counts only shrink as a cut gets finer, so a cell of ``cut`` can reach ``min_rows`` only
-    if each of its sub-cells did. Returns None when some sub-cut has no frequent cell at all,
-    which rules out the whole cut. Size-1 cuts have no sub-cuts and are not restricted.
+    A finer cell can reach ``min_rows`` only inside a frequent cell of each of its sub-cuts, so
+    everything outside them is dead weight for every cut below this one in the walk.
     """
-    if len(cut) == 1:
-        return finest
-    source = finest
-    for sub_cut in combinations(cut, len(cut) - 1):
-        keys = frequent.get(sub_cut)
-        if keys is None:
-            return None
-        # nulls_equal: a missing value is a cell of its own, not an unmatched key
-        source = source.join(keys, on=sub_cut, how="semi", nulls_equal=True)
-    return source
+    # nulls_equal: a missing value is a cell of its own, not an unmatched key
+    return source.join(cells.select(cut), on=cut, how="semi", nulls_equal=True)
+
+
+def walk_cuts(
+    finest: pl.DataFrame, dims: Cut, depth: int, min_rows: int
+) -> dict[Node, pl.DataFrame]:
+    """Format the frequent cells of every cut, keyed by the cut's dimension indices.
+
+    Depth-first walk of the set-enumeration tree: a node's children add one dimension with a
+    smaller index than the node's smallest. Its preorder is colexicographic, so every subset of a
+    cut is visited before the cut, and a cut is skipped unless all its (k-1)-sub-cuts have a
+    frequent cell (row counts only shrink as a cut gets finer). Candidates are only the children
+    of frequent cuts, never all C(n, k) combinations.
+
+    Each frequent cut hands its children a source restricted to its own frequent cells, so
+    roll-ups read less data with depth. At most ``depth`` restricted sources are alive at once.
+    With ``min_rows == 1`` every cell is frequent and nothing is restricted.
+    """
+    parts: dict[Node, pl.DataFrame] = {}
+
+    def visit(source: pl.DataFrame, parent: Node) -> None:
+        for j in range(parent[0] if parent else len(dims)):
+            node = (j, *parent)
+            # dropping node[0] gives the parent, frequent by construction; check the other sub-cuts
+            if any(node[:i] + node[i + 1 :] not in parts for i in range(1, len(node))):
+                continue  # a sub-cut has no frequent cell: skip this node and its whole subtree
+            cut = tuple(dims[i] for i in node)
+            cells = roll_up(source, cut).filter(pl.col("rows") >= min_rows)
+            if cells.is_empty():
+                continue
+            parts[node] = format_cells(order_cells(cells, cut), cut, dims)
+            if len(node) < depth and j > 0:
+                visit(source if min_rows == 1 else restrict_to_cells(source, cut, cells), node)
+
+    visit(finest, ())
+    return parts
 
 
 def order_cells(cells: pl.DataFrame, cut: Cut) -> pl.DataFrame:

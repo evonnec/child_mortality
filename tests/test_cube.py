@@ -14,9 +14,10 @@ from child_mortality.cube import (
     format_cells,
     order_cells,
     ratio_cube,
-    restrict_to_frequent,
+    restrict_to_cells,
     roll_up,
     validate_inputs,
+    walk_cuts,
 )
 from conftest import assert_matches_oracle, naive_cube, ratio_matches
 
@@ -525,8 +526,8 @@ def test_roll_up_sums_measures_over_cut_cells() -> None:
     assert roll_up(source, ("a", "b")).height == 3
 
 
-def test_restrict_to_frequent_semi_joins_on_every_subcut() -> None:
-    finest = pl.DataFrame(
+def test_restrict_to_cells_keeps_rows_inside_the_frequent_cells() -> None:
+    source = pl.DataFrame(
         {
             "a": pl.Series(["x", "x", "y", None], dtype=pl.String),
             "b": ["p", "q", "p", "p"],
@@ -535,27 +536,27 @@ def test_restrict_to_frequent_semi_joins_on_every_subcut() -> None:
             "denominator": [0.0] * 4,
         }
     )
-    frequent: dict[tuple[str, ...], pl.DataFrame] = {
-        ("a",): pl.DataFrame({"a": pl.Series(["x", None], dtype=pl.String)}),
-        ("b",): pl.DataFrame({"b": ["p"]}),
-    }
-    result = restrict_to_frequent(finest, ("a", "b"), frequent)
-    assert result is not None
-    # (x, q) fails on b; (y, p) fails on a; the null a-cell matches the null key.
-    kept = result.select("a", "b").sort("a", nulls_last=True)
-    assert kept.rows() == [("x", "p"), (None, "p")]
+    cells = pl.DataFrame({"a": pl.Series(["x", None], dtype=pl.String), "rows": [5, 5]})
+    result = restrict_to_cells(source, ("a",), cells)
+    # (y, p) is outside the frequent cells; the null a-cell matches the null key.
+    kept = result.select("a", "b").sort("a", "b", nulls_last=True)
+    assert kept.rows() == [("x", "p"), ("x", "q"), (None, "p")]
 
 
-def test_restrict_to_frequent_single_dimension_is_unrestricted() -> None:
-    finest = pl.DataFrame({"a": ["x"], "rows": [1], "numerator": [0.0], "denominator": [0.0]})
-    assert restrict_to_frequent(finest, ("a",), {}) is finest
-
-
-def test_restrict_to_frequent_returns_none_when_a_subcut_is_missing() -> None:
+def test_walk_cuts_skips_a_cut_unless_every_subcut_is_frequent() -> None:
+    # a and c are frequent (4 rows each); b never repeats, so no cut containing b can be.
     finest = pl.DataFrame(
-        {"a": ["x"], "b": ["p"], "rows": [1], "numerator": [0.0], "denominator": [0.0]}
+        {
+            "a": ["x"] * 4,
+            "b": ["1", "2", "3", "4"],
+            "c": ["z"] * 4,
+            "rows": [1] * 4,
+            "numerator": [1.0] * 4,
+            "denominator": [2.0] * 4,
+        }
     )
-    assert restrict_to_frequent(finest, ("a", "b"), {("a",): pl.DataFrame({"a": ["x"]})}) is None
+    assert walk_cuts(finest, ("a", "b", "c"), 3, 2).keys() == {(0,), (2,), (0, 2)}
+    assert walk_cuts(finest, ("a", "b", "c"), 1, 2).keys() == {(0,), (2,)}
 
 
 def test_order_cells_sorts_ascending_with_nulls_last() -> None:

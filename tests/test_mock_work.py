@@ -2,9 +2,9 @@
 
 Roll-ups and restriction joins are counted at the polars level (see ``mock_helpers``), so any
 algorithm that computes the same cube is measured the same way, whatever its helpers are called.
-Strict xfails tagged ``#4`` pin the open defect (pruning adds work instead of avoiding it) and
-flip once it is fixed. The passing tests are the safety net #6 asks for. They hold for today's
-level loop and for the depth-first walk #4 proposes, and each mutation below fails at least one:
+The tests that were strict xfails tagged ``#4`` (pruning added work instead of avoiding it) pass
+since the depth-first walk replaced the level loop. Together with the safety net #6 asks for, they
+hold for the walk, and each mutation below fails at least one:
 
 * no restriction (every roll-up reads the whole finest grain):
   ``test_pruning_shrinks_rollup_input_on_skewed_data``, and on today's code also
@@ -105,9 +105,6 @@ def test_pruning_shrinks_rollup_input_on_survey_data(survey_runs: dict[int, Surv
     assert at30.rollup_calls < exhaustive.rollup_calls
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#4: roll-up + semi-join rows at min_rows=30 are 198% of min_rows=1"
-)
 def test_total_rows_scanned_at_min_rows_30_at_most_75_percent(
     survey_runs: dict[int, SurveyRun],
 ) -> None:
@@ -181,9 +178,6 @@ def test_dimension_without_frequent_cell_is_never_in_a_deeper_rollup() -> None:
     assert [cut for cut in work.rolled_up_cuts if len(cut) >= 2] == [("a", "b")]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#4: candidate cuts are enumerated as C(n, k) per level (20,875 here)"
-)
 def test_cuts_examined_is_linear_in_frequent_cuts_not_combinatorial() -> None:
     """Fast in-process signal on today's loop. A rewrite without ``itertools.combinations`` reads 0
     here; the 50-dimension time budget below is the guard that holds for any implementation.
@@ -271,9 +265,6 @@ print("roll-ups", rollups, file=sys.stderr)
 """
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#4: 50 dims x 20k rows at min_rows=200 takes minutes (C(50, k) loop)"
-)
 def test_50_dims_20k_rows_finishes_within_15_s() -> None:
     """Issue #4's case: 10 binary dims plus 40 dims of 5,000 values each, ``min_rows=200``.
 
