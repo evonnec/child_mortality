@@ -1,6 +1,7 @@
 """Shared helpers: tiny CSV writers and a naive pure-Python reference implementation."""
 
 import csv
+import math
 from collections.abc import Mapping, Sequence
 from itertools import combinations
 from pathlib import Path
@@ -88,6 +89,26 @@ def naive_cube(
                     )
                 )
     return out
+
+
+# Some polars builds (seen: 2.0.0 on Linux x86-64) divide via a reciprocal, one ulp off the
+# correctly rounded quotient Python computes, so ratios are compared with a relative tolerance.
+RATIO_REL_TOL = 1e-12
+
+
+def ratio_matches(actual: float | None, expected: float | None) -> bool:
+    """Both null, or equal within ``RATIO_REL_TOL``."""
+    if actual is None or expected is None:
+        return actual is expected
+    return math.isclose(actual, expected, rel_tol=RATIO_REL_TOL, abs_tol=0.0)
+
+
+def assert_matches_oracle(actual: Sequence[Row], expected: Sequence[Row]) -> None:
+    """Every column equal, the last one (``ratio``) within ``RATIO_REL_TOL``."""
+    assert len(actual) == len(expected)
+    for got, want in zip(actual, expected, strict=True):
+        assert got[:-1] == want[:-1], (got, want)
+        assert ratio_matches(got[-1], want[-1]), (got, want)
 
 
 @pytest.fixture

@@ -1,5 +1,6 @@
 """Unit tests for ``child_mortality.cube``: hand-computed cubes, validation, helpers."""
 
+import math
 from itertools import product
 from typing import Any
 
@@ -16,7 +17,7 @@ from child_mortality.cube import (
     roll_up,
     validate_inputs,
 )
-from conftest import naive_cube
+from conftest import assert_matches_oracle, naive_cube, ratio_matches
 
 
 def tiny() -> pl.DataFrame:
@@ -112,7 +113,7 @@ def test_every_cut_partitions_the_input() -> None:
 def test_matches_naive_oracle() -> None:
     records = tiny().to_dicts()
     cube = ratio_cube(tiny(), ["a", "b"], "num", "den")
-    assert cube.rows() == naive_cube(records, ["a", "b"], "num", "den")
+    assert_matches_oracle(cube.rows(), naive_cube(records, ["a", "b"], "num", "den"))
 
 
 # --- output shape --------------------------------------------------------------------------
@@ -538,3 +539,13 @@ def test_empty_cube_schema() -> None:
             "ratio": pl.Float64,
         }
     )
+
+
+def test_oracle_ratio_tolerance_is_one_ulp_not_a_real_difference() -> None:
+    exact = 5 / 3
+    one_ulp_low = math.nextafter(exact, 0.0)  # what a reciprocal-multiply division can return
+    assert ratio_matches(one_ulp_low, exact)
+    assert not ratio_matches(exact * (1 + 1e-9), exact)
+    assert ratio_matches(None, None)
+    assert not ratio_matches(None, 0.0)
+    assert not ratio_matches(0.0, None)
