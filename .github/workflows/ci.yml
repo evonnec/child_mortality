@@ -168,7 +168,7 @@ jobs:
           wheel=$(realpath dist/*.whl)
           src=$PWD
           venv="$RUNNER_TEMP/venv"
-          expected_version=$(uv version --short)
+          expected_version="$ENTRY_POINT $(uv version --short)"
           uv venv "$venv"
           uv pip install --python "$venv/bin/python" "$wheel"
           # Run from another directory so the checkout cannot shadow the installed package.
