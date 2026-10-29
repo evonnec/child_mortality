@@ -455,7 +455,7 @@ def test_tripwire_helper_aborts_runaway_work() -> None:
 # --- new defects, to be filed (see the orchestrator's new-issues list) --------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="NEW: a repeated CSV header silently uses the first column")
+@pytest.mark.xfail(strict=True, reason="#23: a repeated CSV header silently uses the first column")
 def test_repeated_header_in_generic_csv_is_a_clean_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -466,7 +466,7 @@ def test_repeated_header_in_generic_csv_is_a_clean_error(
 
 
 @pytest.mark.xfail(
-    strict=True, reason="NEW: a repeated survey header silently uses the first column"
+    strict=True, reason="#23: a repeated survey header silently uses the first column"
 )
 def test_repeated_header_in_survey_file_is_a_clean_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -493,7 +493,7 @@ def test_repeated_header_in_survey_file_is_a_clean_error(
         ("min_rows", None),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="NEW: non-integer max_dims/min_rows are not a ValueError")
+@pytest.mark.xfail(strict=True, reason="#24: non-integer max_dims/min_rows are not a ValueError")
 def test_non_integer_max_dims_and_min_rows_are_rejected(name: str, value: Any) -> None:
     table = wide_table(8, ["a", "b"], 0)
     kwargs: dict[str, Any] = {name: value}
