@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 lazy import polars as pl
 
-from child_mortality.cube import NullMeasures, ratio_cube
+from child_mortality.cube import NullMeasures, apply_null_policy, ratio_cube
 
 type StrPath = str | os.PathLike[str]
 
@@ -46,13 +46,10 @@ def load_households(path: StrPath) -> pl.LazyFrame:
     return _scan(path, ())
 
 
-def join_women_households(
-    women: pl.LazyFrame, households: pl.LazyFrame, *, unknown_deaths_are_zero: bool = False
-) -> pl.LazyFrame:
+def join_women_households(women: pl.LazyFrame, households: pl.LazyFrame) -> pl.LazyFrame:
     """Left-join household columns onto each woman and add the ``Children died`` column.
 
-    ``Children died`` is sons plus daughters who died, and null if either count is null. With
-    ``unknown_deaths_are_zero`` each null death count is 0 instead (the ``"zero"`` policy).
+    ``Children died`` is sons plus daughters who died, and null if either count is null.
 
     Raises:
         ValueError: if the household keys are not unique.
@@ -62,12 +59,8 @@ def join_women_households(
         raise ValueError(f"household keys {JOIN_KEYS} are not unique")
     joined = women.join(households, on=list(JOIN_KEYS), how="left", suffix="_household")
     sons, daughters = _DEATH_COLUMNS
-    died = (
-        pl.sum_horizontal(sons, daughters)
-        if unknown_deaths_are_zero
-        else pl.col(sons) + pl.col(daughters)  # one unknown count makes the total unknown
-    )
-    return joined.with_columns(died.alias(NUMERATOR))
+    # plain +: one unknown count makes the total unknown (sum_horizontal would skip it)
+    return joined.with_columns((pl.col(sons) + pl.col(daughters)).alias(NUMERATOR))
 
 
 def cd_ceb_cube(
@@ -81,14 +74,13 @@ def cd_ceb_cube(
 ) -> pl.DataFrame:
     """Children died / children ever born for every cut of the survey dimensions.
 
-    ``null_measures`` is the policy for null counts, as in ``ratio_cube``; under ``"zero"`` a null
-    death count is 0 on its own, so one unknown count does not null ``Children died``.
+    ``null_measures`` is the policy for null counts, as in ``ratio_cube``. It is applied to the
+    three count columns of the women's file before the join, so an error names the column as it
+    appears in that file and its row there, ``"drop"`` and ``"zero"`` log every woman with an
+    unknown count, and under ``"zero"`` each unknown count is 0 on its own.
     """
-    joined = join_women_households(
-        load_women(women_path),
-        load_households(households_path),
-        unknown_deaths_are_zero=null_measures == "zero",
-    )
+    women = apply_null_policy(load_women(women_path), _WOMEN_COUNTS, null_measures)
+    joined = join_women_households(women, load_households(households_path))
     return ratio_cube(
         joined,
         dimensions,

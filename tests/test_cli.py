@@ -32,10 +32,14 @@ def generic_csv(tmp_path: Path) -> Path:
     return write_csv(tmp_path / "in.csv", ("a", "b", "num", "den"), rows)
 
 
-def run_ok(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
+# The women_csv fixture has two women with an unknown count.
+ZERO_WARNING = "child-mortality: warning: null_measures='zero': 2 rows have a null measure\n"
+
+
+def run_ok(capsys: pytest.CaptureFixture[str], *argv: str, err: str = "") -> str:
     assert main(argv) == 0
     captured = capsys.readouterr()
-    assert all(line.startswith("child-mortality: warning: ") for line in captured.err.splitlines())
+    assert captured.err == err
     return captured.out
 
 
@@ -81,7 +85,7 @@ def test_cd_ceb_to_stdout(
 ) -> None:
     out = run_ok(
         capsys, "cd-ceb", "--women", str(women_csv), "--households", str(households_csv),
-        "-d", DIM, "--null-measures", "zero",
+        "-d", DIM, "--null-measures", "zero", err=ZERO_WARNING,
     )  # fmt: skip
     expected = cd_ceb_cube(women_csv, households_csv, dimensions=[DIM], null_measures="zero")
     assert out == expected.write_csv()
@@ -93,7 +97,7 @@ def test_repeatable_dimension_flag_keeps_order(
     out = run_ok(
         capsys, "cd-ceb", "--women", str(women_csv), "--households", str(households_csv),
         "-d", DIM, "--dimension", "Age in 5-year groups", "--max-dims", "2", "--min-rows", "1",
-        "--null-measures", "zero",
+        "--null-measures", "zero", err=ZERO_WARNING,
     )  # fmt: skip
     expected = cd_ceb_cube(
         women_csv,
@@ -182,7 +186,7 @@ def test_parquet_output_file(
     out = run_ok(
         capsys, "cd-ceb", "--women", str(women_csv), "--households", str(households_csv),
         "-d", DIM, "-d", "Age in 5-year groups", "--output", str(out_path),
-        "--null-measures", "zero",
+        "--null-measures", "zero", err=ZERO_WARNING,
     )  # fmt: skip
     assert out == ""
     expected = cd_ceb_cube(

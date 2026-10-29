@@ -5,6 +5,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from child_mortality.cube import NullMeasures
 from child_mortality.survey import (
     DENOMINATOR,
     DIMENSIONS,
@@ -100,21 +101,67 @@ def test_children_died_is_sons_plus_daughters(women_csv: Path, households_csv: P
     }
 
 
-def test_unknown_deaths_are_zero_restores_the_lenient_sum(
-    women_csv: Path, households_csv: Path
-) -> None:
-    joined = join_women_households(
-        load_women(women_csv), load_households(households_csv), unknown_deaths_are_zero=True
-    )
-    died = joined.collect().sort("Cluster number", "Household number")[NUMERATOR]
-    assert died.to_list() == [1, 2, 0, 1]
-
-
 def test_cd_ceb_cube_errors_on_null_counts_by_default(
     women_csv: Path, households_csv: Path
 ) -> None:
     with pytest.raises(ValueError, match="Total children ever born"):
         cd_ceb_cube(women_csv, households_csv, dimensions=["Type of place of residence"])
+
+
+def test_null_count_error_names_the_raw_column_and_its_row_in_the_women_file(
+    tmp_path: Path,
+) -> None:
+    women = write_indexed_csv(
+        tmp_path / "w.csv",
+        WOMEN_HEADER,
+        [
+            ("3", "1", "20-24", "2", "0", "0"),
+            ("2", "1", "20-24", "2", "NA", "0"),
+            ("1", "1", "20-24", "", "0", "0"),
+        ],
+    )
+    # households in the opposite order: the join must not decide which row is reported
+    households = write_indexed_csv(
+        tmp_path / "h.csv", HOUSEHOLD_HEADER, [(str(i), "1", "Urban", "40") for i in (1, 2, 3)]
+    )
+    with pytest.raises(ValueError) as info:
+        cd_ceb_cube(women, households, dimensions=["Type of place of residence"])
+    assert str(info.value).startswith(
+        "column 'Total children ever born' has 1 null rows (first at row 3); "
+        "column 'Sons who have died' has 1 null rows (first at row 2); set null_measures"
+    )
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        # complete-case: only the two Urban women with every count known
+        ("drop", [(1, "Type of place of residence", "Urban", 2, 3.0, 5.0, 0.6)]),
+        # each unknown count is 0: the NA woman adds 0 / 0, the (NA, 1) woman adds 1 / 4
+        (
+            "zero",
+            [
+                (1, "Type of place of residence", "Urban", 2, 3.0, 5.0, 0.6),
+                (1, "Type of place of residence", None, 2, 1.0, 4.0, 0.25),
+            ],
+        ),
+    ],
+)
+def test_drop_and_zero_count_every_woman_with_an_unknown_count(
+    women_csv: Path,
+    households_csv: Path,
+    caplog: pytest.LogCaptureFixture,
+    policy: NullMeasures,
+    expected: list[tuple[object, ...]],
+) -> None:
+    cube = cd_ceb_cube(
+        women_csv, households_csv, dimensions=["Type of place of residence"], null_measures=policy
+    )
+    assert cube.rows() == expected
+    # (NA, NA, NA) and (4, NA, 1): a null death count alone also counts
+    assert [r.getMessage() for r in caplog.records] == [
+        f"null_measures={policy!r}: 2 rows have a null measure"
+    ]
 
 
 def test_duplicate_household_keys_raise(tmp_path: Path, women_csv: Path) -> None:
