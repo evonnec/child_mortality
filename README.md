@@ -34,7 +34,7 @@ by nine dimensions:
 
 ## Install and quickstart
 
-Requires Python 3.15 and [uv](https://docs.astral.sh/uv/). The only runtime dependency is polars.
+Requires Python 3.15 and [uv](https://docs.astral.sh/uv/). The only runtime dependency is polars (2.0 or newer; CI tests that floor as well as the locked version).
 
 ```sh
 uv sync

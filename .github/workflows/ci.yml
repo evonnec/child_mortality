@@ -1,7 +1,7 @@
 name: CI
 
 # Job graph:
-#   lint, format, typecheck, test (parallel) -> build (wheel + sdist, smoke-tested, uploaded as "dist")
+#   lint, format, typecheck, test, test-polars-floor (parallel) -> build (wheel + sdist, smoke-tested, uploaded as "dist")
 # Releases and PyPI publishing live only in release.yml.
 #
 # Python: no job passes `python-version` to setup-uv. uv reads `.python-version` itself and
@@ -126,9 +126,41 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  test-polars-floor:
+    name: Test (pytest, polars floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: auto
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+      - name: Install dependencies
+        run: uv sync --locked
+      # The lock tracks the newest polars, so a declared floor is only honest if it is tested.
+      # The floor is read from pyproject.toml ("polars>=X"), so the two cannot drift apart.
+      - name: Install the lowest supported polars
+        run: |
+          floor=$(sed -nE 's/^dependencies = \["polars>=([0-9][0-9.]*)"\]$/\1/p' pyproject.toml)
+          if [[ -z "$floor" ]]; then
+            echo "::error::could not read the polars floor from pyproject.toml"
+            exit 1
+          fi
+          uv pip install "polars==$floor"
+          uv run --no-sync python -c "import polars; print('polars', polars.__version__)"
+      - name: Run pytest
+        run: uv run --no-sync pytest
+
   build:
     name: Build and smoke-test wheel
-    needs: [lint, format, typecheck, test]
+    needs: [lint, format, typecheck, test, test-polars-floor]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

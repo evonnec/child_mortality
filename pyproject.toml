@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Typing :: Typed",
 ]
-dependencies = ["polars>=1.24"]
+dependencies = ["polars>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/evonnec/child_mortality"
