@@ -1,12 +1,20 @@
 """Ratio metrics over every dimensional cut of a table, with iceberg pruning."""
 
+import logging
 from collections.abc import Sequence
 from itertools import combinations
+from typing import Literal, get_args
 
 lazy import polars as pl
 
 # A cut is a subset of the dimensions, kept in the caller's dimension order.
 type Cut = tuple[str, ...]
+# What a null numerator or denominator means; see ``ratio_cube``.
+type NullMeasures = Literal["error", "drop", "zero"]
+
+_NULL_POLICIES = get_args(NullMeasures.__value__)
+
+logger = logging.getLogger(__name__)
 
 CUT_SEPARATOR = "|"
 _MEASURES = ("rows", "numerator", "denominator")
@@ -22,6 +30,7 @@ def ratio_cube(
     *,
     max_dims: int | None = None,
     min_rows: int = 1,
+    null_measures: NullMeasures = "error",
 ) -> pl.DataFrame:
     """Compute ``sum(numerator) / sum(denominator)`` for every cell of every cut.
 
@@ -33,6 +42,11 @@ def ratio_cube(
     missing value), ``rows``, ``numerator``, ``denominator`` and ``ratio`` (null when the
     denominator is 0). Rows are ordered by cut size, then cut, then cell values (nulls last).
 
+    ``null_measures`` says what a null numerator or denominator means. ``"error"`` (default)
+    raises. ``"drop"`` leaves the whole row out of ``rows``, ``numerator`` and ``denominator``
+    (complete-case). ``"zero"`` counts each null as 0 on its own side. For ``"drop"`` and
+    ``"zero"`` the number of affected rows is logged at WARNING.
+
     Raises:
         ValueError: if the arguments or the columns of ``data`` are invalid.
     """
@@ -41,7 +55,7 @@ def ratio_cube(
         lazy.collect_schema(), dimensions, numerator, denominator, max_dims, min_rows
     )
     dims = tuple(dimensions)
-    finest = finest_grain(lazy, dims, numerator, denominator)
+    finest = finest_grain(lazy, dims, numerator, denominator, null_measures)
     # min_rows above the table size can never be met: skip every cut.
     if finest.is_empty() or min_rows > finest["rows"].sum():
         return empty_cube(dims)
@@ -98,13 +112,63 @@ def validate_inputs(
     return depth
 
 
-def finest_grain(data: pl.LazyFrame, dims: Cut, numerator: str, denominator: str) -> pl.DataFrame:
-    """Aggregate once to every distinct dimension combination: rows, numerator, denominator."""
+def apply_null_policy(
+    data: pl.LazyFrame, measures: Cut, null_measures: NullMeasures
+) -> pl.LazyFrame:
+    """Apply ``null_measures`` to the measure columns: raise, drop incomplete rows or fill 0.
+
+    Raises:
+        ValueError: if the policy is unknown, or it is ``"error"`` and a measure has nulls.
+    """
+    if null_measures not in _NULL_POLICIES:
+        raise ValueError(f"null_measures must be one of {_NULL_POLICIES}, got {null_measures!r}")
+    # "row" is the 1-based position in the input.
+    stats = (
+        data.select(*measures)
+        .with_row_index("row", offset=1)
+        .select(
+            *[pl.col(m).is_null().sum().alias(f"{m}.count") for m in measures],
+            *[
+                pl.col("row").filter(pl.col(m).is_null()).min().alias(f"{m}.first")
+                for m in measures
+            ],
+            pl.any_horizontal(pl.col(*measures).is_null()).sum().alias("affected"),
+        )
+        .collect()
+        .row(0, named=True)
+    )
+    if not stats["affected"]:
+        return data
+    if null_measures == "error":
+        found = "; ".join(
+            f"column {m!r} has {stats[f'{m}.count']} null rows (first at row {stats[f'{m}.first']})"
+            for m in measures
+            if stats[f"{m}.count"]
+        )
+        raise ValueError(
+            f"{found}; set null_measures (CLI: --null-measures) to 'drop' or 'zero' to proceed"
+        )
+    logger.warning(
+        "null_measures=%r: %d rows have a null measure", null_measures, stats["affected"]
+    )
+    if null_measures == "drop":
+        return data.drop_nulls(list(measures))
+    return data.with_columns(pl.col(*measures).fill_null(0))
+
+
+def finest_grain(
+    data: pl.LazyFrame, dims: Cut, numerator: str, denominator: str, null_measures: NullMeasures
+) -> pl.DataFrame:
+    """Aggregate once to every distinct dimension combination: rows, numerator, denominator.
+
+    Nulls in the two measures are handled first, by the ``null_measures`` policy.
+    """
+    data = apply_null_policy(data, (numerator, denominator), null_measures)
     return (
         data.select(
             pl.col(dims).cast(pl.String),
-            pl.col(numerator).fill_null(0).cast(pl.Float64).alias("numerator"),
-            pl.col(denominator).fill_null(0).cast(pl.Float64).alias("denominator"),
+            pl.col(numerator).cast(pl.Float64).alias("numerator"),
+            pl.col(denominator).cast(pl.Float64).alias("denominator"),
         )
         .group_by(dims)
         .agg(

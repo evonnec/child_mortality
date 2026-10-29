@@ -85,7 +85,7 @@ def test_children_died_is_sons_plus_daughters(women_csv: Path, households_csv: P
     joined = join_women_households(load_women(women_csv), load_households(households_csv))
     frame = joined.collect()
     assert frame.schema[NUMERATOR] == pl.Int64
-    # (1, 0) -> 1; (0, 2) -> 2; (NA, NA) -> 0; (NA, 1) -> 1 (a missing count adds 0)
+    # (1, 0) -> 1; (0, 2) -> 2; (NA, NA) -> null; (NA, 1) -> null (an unknown count is unknown)
     by_key = {
         (row["Cluster number"], row["Household number"], row["Age in 5-year groups"]): row[
             NUMERATOR
@@ -95,9 +95,26 @@ def test_children_died_is_sons_plus_daughters(women_csv: Path, households_csv: P
     assert by_key == {
         ("1", "1", "20-24"): 1,
         ("1", "1", "25-29"): 2,
-        ("1", "2", "20-24"): 0,
-        ("9", "9", "30-34"): 1,
+        ("1", "2", "20-24"): None,
+        ("9", "9", "30-34"): None,
     }
+
+
+def test_unknown_deaths_are_zero_restores_the_lenient_sum(
+    women_csv: Path, households_csv: Path
+) -> None:
+    joined = join_women_households(
+        load_women(women_csv), load_households(households_csv), unknown_deaths_are_zero=True
+    )
+    died = joined.collect().sort("Cluster number", "Household number")[NUMERATOR]
+    assert died.to_list() == [1, 2, 0, 1]
+
+
+def test_cd_ceb_cube_errors_on_null_counts_by_default(
+    women_csv: Path, households_csv: Path
+) -> None:
+    with pytest.raises(ValueError, match="Total children ever born"):
+        cd_ceb_cube(women_csv, households_csv, dimensions=["Type of place of residence"])
 
 
 def test_duplicate_household_keys_raise(tmp_path: Path, women_csv: Path) -> None:
@@ -115,6 +132,7 @@ def test_cd_ceb_cube_with_custom_dimensions(women_csv: Path, households_csv: Pat
         women_csv,
         households_csv,
         dimensions=["Type of place of residence"],
+        null_measures="zero",
     )
     assert cube.columns == [
         "cut_size",
@@ -135,11 +153,13 @@ def test_cd_ceb_cube_with_custom_dimensions(women_csv: Path, households_csv: Pat
 
 def test_cd_ceb_cube_passes_max_dims_and_min_rows(women_csv: Path, households_csv: Path) -> None:
     dims = ["Type of place of residence", "Age in 5-year groups"]
-    full = cd_ceb_cube(women_csv, households_csv, dimensions=dims)
+    full = cd_ceb_cube(women_csv, households_csv, dimensions=dims, null_measures="zero")
     assert full["cut_size"].max() == 2
-    one = cd_ceb_cube(women_csv, households_csv, dimensions=dims, max_dims=1)
+    one = cd_ceb_cube(women_csv, households_csv, dimensions=dims, max_dims=1, null_measures="zero")
     assert one["cut_size"].max() == 1
-    frequent = cd_ceb_cube(women_csv, households_csv, dimensions=dims, min_rows=2)
+    frequent = cd_ceb_cube(
+        women_csv, households_csv, dimensions=dims, min_rows=2, null_measures="zero"
+    )
     assert frequent.equals(full.filter(pl.col("rows") >= 2))
 
 

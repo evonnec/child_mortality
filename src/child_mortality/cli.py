@@ -3,18 +3,19 @@
 import argparse
 import contextlib
 import errno
+import logging
 import os
 import secrets
 import shutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, get_args
 
 lazy import polars as pl
 
 from child_mortality import __version__
-from child_mortality.cube import ratio_cube
+from child_mortality.cube import NullMeasures, ratio_cube
 from child_mortality.survey import (
     DIMENSIONS,
     NA_VALUES,
@@ -89,6 +90,13 @@ def _add_cube_options(parser: argparse.ArgumentParser) -> None:
         "--min-rows", type=int, default=1, help="drop cells with fewer rows (default: %(default)s)"
     )
     parser.add_argument(
+        "--null-measures",
+        choices=get_args(NullMeasures.__value__),
+        default="error",
+        help="null numerator or denominator: fail, drop the row (complete-case) or count it as 0 "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
         "-o", "--output", type=Path, help="write .csv or .parquet (default: CSV on stdout)"
     )
 
@@ -148,6 +156,25 @@ def _detach_stdout() -> None:
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
+class _StderrHandler(logging.Handler):
+    """Print library warnings (such as the null-row count) as ``child-mortality: warning: ...``."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        print(f"{PROG}: warning: {record.getMessage()}", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def _library_warnings() -> Iterator[None]:
+    """Route the library's log records to stderr for the duration of the block."""
+    logger = logging.getLogger("child_mortality")
+    handler = _StderrHandler()
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+
+
 def run(args: argparse.Namespace) -> pl.DataFrame:
     if args.command == "cd-ceb":
         return cd_ceb_cube(
@@ -156,6 +183,7 @@ def run(args: argparse.Namespace) -> pl.DataFrame:
             dimensions=args.dimensions or DIMENSIONS,
             max_dims=args.max_dims,
             min_rows=args.min_rows,
+            null_measures=args.null_measures,
         )
     data = read_generic(args.input, args.numerator, args.denominator)
     return ratio_cube(
@@ -165,6 +193,7 @@ def run(args: argparse.Namespace) -> pl.DataFrame:
         args.denominator,
         max_dims=args.max_dims,
         min_rows=args.min_rows,
+        null_measures=args.null_measures,
     )
 
 
@@ -178,7 +207,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if output is not None and output.suffix.lower() not in _WRITERS:
         return fail(f"output must end in .csv or .parquet, got {output.name!r}")
     try:
-        write_cube(run(args), output)
+        with _library_warnings():
+            cube = run(args)
+        write_cube(cube, output)
     except BrokenPipeError:
         _detach_stdout()
         return EXIT_PIPE

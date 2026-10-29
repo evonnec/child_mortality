@@ -56,11 +56,25 @@ def naive_cube(
     *,
     max_dims: int | None = None,
     min_rows: int = 1,
+    null_measures: str = "error",
 ) -> list[Row]:
     """Reference implementation: group every cut straight from the raw records.
 
+    ``null_measures`` is the policy for a null numerator or denominator: "error" raises
+    ValueError, "drop" skips the whole record, "zero" counts the null as 0 on its own side.
+
     Returns tuples shaped like ``ratio_cube(...).rows()``.
     """
+    if null_measures not in ("error", "drop", "zero"):
+        raise ValueError(null_measures)
+
+    def incomplete(rec: Record) -> bool:
+        return rec[numerator] is None or rec[denominator] is None
+
+    if null_measures == "error" and any(incomplete(rec) for rec in records):
+        raise ValueError("null measure")
+    if null_measures == "drop":
+        records = [rec for rec in records if not incomplete(rec)]
     depth = len(dims) if max_dims is None else max_dims
     out: list[Row] = []
     for size in range(1, depth + 1):
