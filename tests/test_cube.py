@@ -1,0 +1,540 @@
+"""Unit tests for ``child_mortality.cube``: hand-computed cubes, validation, helpers."""
+
+from itertools import product
+from typing import Any
+
+import polars as pl
+import pytest
+
+from child_mortality.cube import (
+    empty_cube,
+    finest_grain,
+    format_cells,
+    order_cells,
+    ratio_cube,
+    restrict_to_frequent,
+    roll_up,
+    validate_inputs,
+)
+from conftest import naive_cube
+
+
+def tiny() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "a": ["x", "x", "y", None],
+            "b": ["p", "q", "p", "p"],
+            "num": [1, 2, 3, 4],
+            "den": [2, 0, 6, 8],
+        }
+    )
+
+
+def grid() -> pl.DataFrame:
+    """3 age groups x 2 residence types x 2 household sizes, every combination once."""
+    combos = list(product(["a", "b", "c"], ["u", "r"], ["s", "l"]))
+    return pl.DataFrame(
+        {
+            "age": [c[0] for c in combos],
+            "res": [c[1] for c in combos],
+            "size": [c[2] for c in combos],
+            "num": list(range(12)),
+            "den": [10] * 12,
+        }
+    )
+
+
+GRID_DIMS = ["age", "res", "size"]
+
+# --- hand-computed cubes -------------------------------------------------------------------
+
+
+def test_two_dimension_cube_by_hand() -> None:
+    cube = ratio_cube(tiny(), ["a", "b"], "num", "den")
+    # cut_size, cut, a, b, rows, numerator, denominator, ratio
+    assert cube.rows() == [
+        (1, "a", "x", None, 2, 3.0, 2.0, 1.5),
+        (1, "a", "y", None, 1, 3.0, 6.0, 0.5),
+        (1, "a", None, None, 1, 4.0, 8.0, 0.5),
+        (1, "b", None, "p", 3, 8.0, 16.0, 0.5),
+        (1, "b", None, "q", 1, 2.0, 0.0, None),
+        (2, "a|b", "x", "p", 1, 1.0, 2.0, 0.5),
+        (2, "a|b", "x", "q", 1, 2.0, 0.0, None),
+        (2, "a|b", "y", "p", 1, 3.0, 6.0, 0.5),
+        (2, "a|b", None, "p", 1, 4.0, 8.0, 0.5),
+    ]
+
+
+def test_single_dimension_cube() -> None:
+    df = pl.DataFrame({"g": ["m", "f", "m"], "n": [1, 2, 3], "d": [4, 4, 4]})
+    cube = ratio_cube(df, ["g"], "n", "d")
+    assert cube.rows() == [
+        (1, "g", "f", 1, 2.0, 4.0, 0.5),
+        (1, "g", "m", 2, 4.0, 8.0, 0.5),
+    ]
+
+
+def test_grid_cell_counts_per_cut_size() -> None:
+    cube = ratio_cube(grid(), GRID_DIMS, "num", "den")
+    counts = cube.group_by("cut_size").len().sort("cut_size")
+    assert counts.rows() == [(1, 3 + 2 + 2), (2, 3 * 2 + 3 * 2 + 2 * 2), (3, 12)]
+    assert cube.height == 35
+    assert cube.group_by("cut").len().height == 7
+
+
+def test_grid_exact_cells() -> None:
+    cube = ratio_cube(grid(), GRID_DIMS, "num", "den")
+
+    def one(cut: str, **values: str) -> tuple[Any, ...]:
+        frame = cube.filter(pl.col("cut") == cut)
+        for column, value in values.items():
+            frame = frame.filter(pl.col(column) == value)
+        assert frame.height == 1
+        row = frame.row(0, named=True)
+        return row["rows"], row["numerator"], row["denominator"], row["ratio"]
+
+    assert one("age", age="a") == (4, 6.0, 40.0, 0.15)  # i = 0..3
+    assert one("res", res="u") == (6, 27.0, 60.0, 0.45)  # i = 0, 1, 4, 5, 8, 9
+    assert one("size", size="s") == (6, 30.0, 60.0, 0.5)  # even i
+    assert one("age|res", age="b", res="r") == (2, 13.0, 20.0, 0.65)  # i = 6, 7
+    assert one("age|res|size", age="a", res="u", size="s") == (1, 0.0, 10.0, 0.0)
+    assert one("age|res|size", age="c", res="r", size="l") == (1, 11.0, 10.0, 1.1)
+
+
+def test_every_cut_partitions_the_input() -> None:
+    cube = ratio_cube(grid(), GRID_DIMS, "num", "den")
+    for cut, cells in cube.group_by("cut"):
+        assert cells["rows"].sum() == 12, cut
+        assert cells["numerator"].sum() == 66.0, cut
+        assert cells["denominator"].sum() == 120.0, cut
+
+
+def test_matches_naive_oracle() -> None:
+    records = tiny().to_dicts()
+    cube = ratio_cube(tiny(), ["a", "b"], "num", "den")
+    assert cube.rows() == naive_cube(records, ["a", "b"], "num", "den")
+
+
+# --- output shape --------------------------------------------------------------------------
+
+
+def test_output_schema_and_column_order() -> None:
+    cube = ratio_cube(tiny(), ["b", "a"], "num", "den")
+    assert cube.schema == pl.Schema(
+        {
+            "cut_size": pl.Int64,
+            "cut": pl.String,
+            "b": pl.String,
+            "a": pl.String,
+            "rows": pl.Int64,
+            "numerator": pl.Float64,
+            "denominator": pl.Float64,
+            "ratio": pl.Float64,
+        }
+    )
+
+
+@pytest.mark.parametrize("dtype", [pl.Int8, pl.UInt32, pl.Int64, pl.Float32, pl.Float64])
+def test_measure_dtypes_become_float64(dtype: pl.DataType) -> None:
+    df = tiny().with_columns(pl.col("num", "den").cast(dtype))
+    cube = ratio_cube(df, ["a"], "num", "den")
+    assert cube.schema["numerator"] == pl.Float64
+    assert cube.schema["denominator"] == pl.Float64
+    assert cube.row(0) == (1, "a", "x", 2, 3.0, 2.0, 1.5)
+
+
+def test_non_string_dimensions_are_cast_to_string() -> None:
+    df = pl.DataFrame({"k": [10, 9, 10], "flag": [True, False, True], "n": [1, 1, 1], "d": [2] * 3})
+    cube = ratio_cube(df, ["k", "flag"], "n", "d", max_dims=1)
+    assert cube.schema["k"] == pl.String
+    assert cube.filter(cut="k")["k"].to_list() == ["10", "9"]  # string order, not numeric
+    assert cube.filter(cut="flag")["flag"].to_list() == ["false", "true"]
+
+
+def test_cut_follows_dimension_order_not_alphabetical() -> None:
+    cube = ratio_cube(tiny(), ["b", "a"], "num", "den")
+    assert cube["cut"].unique(maintain_order=True).to_list() == ["b", "a", "b|a"]
+
+
+# --- deterministic ordering ----------------------------------------------------------------
+
+
+def test_cut_order_is_itertools_combinations_order() -> None:
+    df = pl.DataFrame({"a": ["1"], "b": ["1"], "c": ["1"], "n": [1], "d": [1]})
+    cube = ratio_cube(df, ["a", "b", "c"], "n", "d")
+    assert cube["cut"].to_list() == ["a", "b", "c", "a|b", "a|c", "b|c", "a|b|c"]
+    assert cube["cut_size"].to_list() == [1, 1, 1, 2, 2, 2, 3]
+
+
+def test_values_ascending_nulls_last_within_cut() -> None:
+    df = pl.DataFrame({"a": ["b", "a", None, "c", "a"], "n": [1] * 5, "d": [1] * 5})
+    cube = ratio_cube(df, ["a"], "n", "d")
+    assert cube["a"].to_list() == ["a", "b", "c", None]
+    assert cube["rows"].to_list() == [2, 1, 1, 1]
+
+
+def test_result_is_independent_of_input_row_order() -> None:
+    df = grid()
+    shuffled = df.sample(fraction=1.0, shuffle=True, seed=7)
+    assert ratio_cube(df, GRID_DIMS, "num", "den").equals(
+        ratio_cube(shuffled, GRID_DIMS, "num", "den")
+    )
+
+
+# --- max_dims / min_rows -------------------------------------------------------------------
+
+
+def test_max_dims_defaults_to_all_dimensions() -> None:
+    cube = ratio_cube(grid(), GRID_DIMS, "num", "den")
+    assert cube["cut_size"].max() == 3
+    explicit = ratio_cube(grid(), GRID_DIMS, "num", "den", max_dims=3)
+    assert cube.equals(explicit)
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_max_dims_limits_cut_size(limit: int) -> None:
+    full = ratio_cube(grid(), GRID_DIMS, "num", "den")
+    limited = ratio_cube(grid(), GRID_DIMS, "num", "den", max_dims=limit)
+    assert limited.equals(full.filter(pl.col("cut_size") <= limit))
+    assert limited["cut_size"].max() == limit
+
+
+def test_min_rows_drops_small_cells() -> None:
+    cube = ratio_cube(grid(), GRID_DIMS, "num", "den", min_rows=4)
+    assert cube.rows() == [
+        (1, "age", "a", None, None, 4, 6.0, 40.0, 0.15),
+        (1, "age", "b", None, None, 4, 22.0, 40.0, 0.55),
+        (1, "age", "c", None, None, 4, 38.0, 40.0, 0.95),
+        (1, "res", None, "r", None, 6, 39.0, 60.0, 0.65),
+        (1, "res", None, "u", None, 6, 27.0, 60.0, 0.45),
+        (1, "size", None, None, "l", 6, 36.0, 60.0, 0.6),
+        (1, "size", None, None, "s", 6, 30.0, 60.0, 0.5),
+    ]
+
+
+def test_min_rows_equals_filtered_full_cube_including_order() -> None:
+    records = [
+        {"a": a, "b": b, "c": c, "n": i % 3, "d": 1 + i % 2}
+        for i, (a, b, c) in enumerate(
+            list(product(["x", "y", None], ["p", "q"], ["u", "v", "w"])) * 3
+        )
+    ]
+    df = pl.DataFrame(records, schema_overrides={"a": pl.String})
+    full = ratio_cube(df, ["a", "b", "c"], "n", "d")
+    for threshold in (1, 2, 3, 6, 9, 18, 54, 55):
+        pruned = ratio_cube(df, ["a", "b", "c"], "n", "d", min_rows=threshold)
+        assert pruned.equals(full.filter(pl.col("rows") >= threshold)), threshold
+
+
+def test_min_rows_above_total_rows_is_empty_with_schema() -> None:
+    cube = ratio_cube(tiny(), ["a", "b"], "num", "den", min_rows=5)
+    assert cube.is_empty()
+    assert cube.schema == empty_cube(("a", "b")).schema
+
+
+def test_min_rows_equal_to_total_rows_keeps_only_full_cells() -> None:
+    df = pl.DataFrame({"a": ["x"] * 3, "b": ["p", "p", "q"], "n": [1, 1, 1], "d": [2, 2, 2]})
+    cube = ratio_cube(df, ["a", "b"], "n", "d", min_rows=3)
+    assert cube.rows() == [(1, "a", "x", None, 3, 3.0, 6.0, 0.5)]
+
+
+def test_min_rows_skips_cut_whose_subcut_has_no_frequent_cell() -> None:
+    # "a" is unique per row so it has no frequent cell: cuts containing it are skipped.
+    df = pl.DataFrame(
+        {"a": ["1", "2", "3", "4"], "b": ["p", "p", "q", "q"], "c": ["u", "u", "u", "u"]}
+    ).with_columns(n=pl.lit(1), d=pl.lit(1))
+    cube = ratio_cube(df, ["a", "b", "c"], "n", "d", min_rows=2)
+    assert cube["cut"].unique(maintain_order=True).to_list() == ["b", "c", "b|c"]
+    assert cube.filter(cut="b|c").rows() == [
+        (2, "b|c", None, "p", "u", 2, 2.0, 2.0, 1.0),
+        (2, "b|c", None, "q", "u", 2, 2.0, 2.0, 1.0),
+    ]
+
+
+def test_min_rows_stops_when_a_level_has_no_frequent_cell() -> None:
+    df = pl.DataFrame({"a": ["1", "2", "3"], "b": ["x", "y", "z"], "n": [1, 1, 1], "d": [1] * 3})
+    cube = ratio_cube(df, ["a", "b"], "n", "d", min_rows=2)
+    assert cube.is_empty()
+    assert cube.schema == empty_cube(("a", "b")).schema
+
+
+def test_min_rows_prunes_cells_whose_subcell_is_infrequent() -> None:
+    # Every (a, b) cell has one row, so no 2-cut cell is frequent although a and b are.
+    df = pl.DataFrame(
+        {"a": ["x", "x", "y", "y"], "b": ["p", "q", "p", "q"], "n": [1] * 4, "d": [1] * 4}
+    )
+    cube = ratio_cube(df, ["a", "b"], "n", "d", min_rows=2)
+    assert set(cube["cut"]) == {"a", "b"}
+
+
+def test_min_rows_keeps_null_cells_through_pruning() -> None:
+    df = pl.DataFrame(
+        {
+            "a": pl.Series([None, None, "x"], dtype=pl.String),
+            "b": ["p", "p", "p"],
+            "n": [1, 1, 1],
+            "d": [1, 1, 1],
+        }
+    )
+    cube = ratio_cube(df, ["a", "b"], "n", "d", min_rows=2)
+    assert cube.rows() == [
+        (1, "a", None, None, 2, 2.0, 2.0, 1.0),
+        (1, "b", None, "p", 3, 3.0, 3.0, 1.0),
+        (2, "a|b", None, "p", 2, 2.0, 2.0, 1.0),
+    ]
+
+
+# --- zero denominators and nulls -----------------------------------------------------------
+
+
+def test_zero_denominator_gives_null_ratio() -> None:
+    df = pl.DataFrame({"a": ["x", "y"], "n": [3, 0], "d": [0, 0]})
+    cube = ratio_cube(df, ["a"], "n", "d")
+    assert cube.rows() == [
+        (1, "a", "x", 1, 3.0, 0.0, None),
+        (1, "a", "y", 1, 0.0, 0.0, None),
+    ]
+
+
+def test_null_measures_count_as_zero_but_rows_are_counted() -> None:
+    df = pl.DataFrame(
+        {
+            "a": ["x", "x", "y"],
+            "n": pl.Series([None, 2, None], dtype=pl.Int64),
+            "d": pl.Series([None, 4, None], dtype=pl.Int64),
+        }
+    )
+    cube = ratio_cube(df, ["a"], "n", "d")
+    assert cube.rows() == [
+        (1, "a", "x", 2, 2.0, 4.0, 0.5),
+        (1, "a", "y", 1, 0.0, 0.0, None),
+    ]
+
+
+def test_null_dimension_values_form_their_own_cell() -> None:
+    cube = ratio_cube(tiny(), ["a", "b"], "num", "den")
+    missing_a = cube.filter((pl.col("cut") == "a") & pl.col("a").is_null())
+    assert missing_a.rows() == [(1, "a", None, None, 1, 4.0, 8.0, 0.5)]
+    # In cut "b" the a column is null because a is not in the cut, not because it is missing.
+    not_in_cut = cube.filter(cut="b", b="p")
+    assert not_in_cut["a"].to_list() == [None]
+    assert not_in_cut["rows"].to_list() == [3]
+    # A null inside a multi-dimension cut is its own cell, told apart by the cut column.
+    assert cube.filter((pl.col("cut") == "a|b") & pl.col("a").is_null()).rows() == [
+        (2, "a|b", None, "p", 1, 4.0, 8.0, 0.5)
+    ]
+
+
+def test_all_null_dimension_column_is_a_single_missing_cell() -> None:
+    df = pl.DataFrame({"a": pl.Series([None, None], dtype=pl.String), "n": [1, 2], "d": [2, 2]})
+    cube = ratio_cube(df, ["a"], "n", "d")
+    assert cube.rows() == [(1, "a", None, 2, 3.0, 4.0, 0.75)]
+
+
+# --- input kinds and emptiness -------------------------------------------------------------
+
+
+def test_lazyframe_and_dataframe_agree() -> None:
+    eager = ratio_cube(tiny(), ["a", "b"], "num", "den")
+    lazy = ratio_cube(tiny().lazy(), ["a", "b"], "num", "den")
+    assert isinstance(lazy, pl.DataFrame)
+    assert eager.equals(lazy)
+
+
+def test_dimensions_may_be_a_tuple() -> None:
+    assert ratio_cube(tiny(), ("a", "b"), "num", "den").equals(
+        ratio_cube(tiny(), ["a", "b"], "num", "den")
+    )
+
+
+def test_empty_input_returns_empty_frame_with_schema() -> None:
+    cube = ratio_cube(tiny().clear(), ["a", "b"], "num", "den")
+    assert cube.is_empty()
+    assert cube.schema == empty_cube(("a", "b")).schema
+    assert cube.columns == [
+        "cut_size",
+        "cut",
+        "a",
+        "b",
+        "rows",
+        "numerator",
+        "denominator",
+        "ratio",
+    ]
+
+
+def test_empty_lazy_input_with_min_rows() -> None:
+    cube = ratio_cube(tiny().clear().lazy(), ["a"], "num", "den", min_rows=3)
+    assert cube.is_empty()
+    assert cube.schema == empty_cube(("a",)).schema
+
+
+# --- validation ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"dimensions": []}, "at least one dimension"),
+        ({"dimensions": ["a", "b", "a"]}, r"duplicate dimensions: \['a'\]"),
+        ({"dimensions": ["a|b"]}, r"must not contain '\|': \['a\|b'\]"),
+        ({"dimensions": ["a", "cut"]}, r"clash with output columns: \['cut'\]"),
+        ({"dimensions": ["rows"]}, "clash with output columns"),
+        ({"dimensions": ["ratio"]}, "clash with output columns"),
+        ({"dimensions": ["cut_size"]}, "clash with output columns"),
+        ({"dimensions": ["numerator"]}, "clash with output columns"),
+        ({"dimensions": ["denominator"]}, "clash with output columns"),
+        ({"dimensions": ["a", "zzz", "yyy"]}, r"columns not found in data: \['yyy', 'zzz'\]"),
+        ({"numerator": "missing"}, r"columns not found in data: \['missing'\]"),
+        ({"denominator": "missing"}, r"columns not found in data: \['missing'\]"),
+        ({"numerator": "a"}, "column 'a' must be numeric, not String"),
+        ({"denominator": "b"}, "column 'b' must be numeric, not String"),
+        ({"numerator": "flag"}, "column 'flag' must be numeric, not Boolean"),
+        ({"dimensions": ["a", "num"]}, "column 'num' cannot be both a measure and a dimension"),
+        ({"dimensions": ["a", "den"]}, "column 'den' cannot be both a measure and a dimension"),
+        ({"max_dims": 0}, "max_dims must be between 1 and 2, got 0"),
+        ({"max_dims": 3}, "max_dims must be between 1 and 2, got 3"),
+        ({"max_dims": -1}, "max_dims must be between 1 and 2, got -1"),
+        ({"min_rows": 0}, "min_rows must be at least 1, got 0"),
+        ({"min_rows": -5}, "min_rows must be at least 1, got -5"),
+    ],
+)
+def test_validation_errors(kwargs: dict[str, Any], message: str) -> None:
+    df = tiny().with_columns(flag=pl.lit(True))
+    arguments: dict[str, Any] = {
+        "dimensions": ["a", "b"],
+        "numerator": "num",
+        "denominator": "den",
+    }
+    arguments.update(kwargs)
+    with pytest.raises(ValueError, match=message):
+        ratio_cube(df, **arguments)
+
+
+def test_validation_also_applies_to_empty_input() -> None:
+    with pytest.raises(ValueError, match="not found"):
+        ratio_cube(tiny().clear(), ["nope"], "num", "den")
+
+
+# --- helpers -------------------------------------------------------------------------------
+
+SCHEMA = pl.Schema({"a": pl.String, "b": pl.String, "n": pl.Int64, "d": pl.Float64})
+
+
+def test_validate_inputs_returns_resolved_max_dims() -> None:
+    assert validate_inputs(SCHEMA, ["a", "b"], "n", "d", None, 1) == 2
+    assert validate_inputs(SCHEMA, ["a", "b"], "n", "d", 1, 5) == 1
+
+
+def test_validate_inputs_rejects_bad_max_dims() -> None:
+    with pytest.raises(ValueError, match="max_dims"):
+        validate_inputs(SCHEMA, ["a", "b"], "n", "d", 3, 1)
+
+
+def test_finest_grain_aggregates_distinct_combinations() -> None:
+    df = pl.DataFrame(
+        {
+            "a": ["x", "x", "x", None],
+            "b": ["p", "p", "q", "p"],
+            "n": pl.Series([1, None, 3, 4], dtype=pl.Int64),
+            "d": [2] * 4,
+        }
+    )
+    result = finest_grain(df.lazy(), ("a", "b"), "n", "d").sort("a", "b", nulls_last=True)
+    assert result.columns == ["a", "b", "rows", "numerator", "denominator"]
+    assert result.rows() == [
+        ("x", "p", 2, 1.0, 4.0),
+        ("x", "q", 1, 3.0, 2.0),
+        (None, "p", 1, 4.0, 2.0),
+    ]
+    assert result.schema["rows"] == pl.Int64
+    assert result.schema["numerator"] == pl.Float64
+
+
+def test_roll_up_sums_measures_over_cut_cells() -> None:
+    source = pl.DataFrame(
+        {
+            "a": ["x", "x", "y"],
+            "b": ["p", "q", "p"],
+            "rows": [1, 2, 4],
+            "numerator": [1.0, 2.0, 3.0],
+            "denominator": [4.0, 5.0, 6.0],
+        }
+    )
+    result = roll_up(source, ("a",)).sort("a")
+    assert result.rows() == [("x", 3, 3.0, 9.0), ("y", 4, 3.0, 6.0)]
+    assert roll_up(source, ("a", "b")).height == 3
+
+
+def test_restrict_to_frequent_semi_joins_on_every_subcut() -> None:
+    finest = pl.DataFrame(
+        {
+            "a": pl.Series(["x", "x", "y", None], dtype=pl.String),
+            "b": ["p", "q", "p", "p"],
+            "rows": [1, 1, 1, 1],
+            "numerator": [0.0] * 4,
+            "denominator": [0.0] * 4,
+        }
+    )
+    frequent: dict[tuple[str, ...], pl.DataFrame] = {
+        ("a",): pl.DataFrame({"a": pl.Series(["x", None], dtype=pl.String)}),
+        ("b",): pl.DataFrame({"b": ["p"]}),
+    }
+    result = restrict_to_frequent(finest, ("a", "b"), frequent)
+    assert result is not None
+    # (x, q) fails on b; (y, p) fails on a; the null a-cell matches the null key.
+    kept = result.select("a", "b").sort("a", nulls_last=True)
+    assert kept.rows() == [("x", "p"), (None, "p")]
+
+
+def test_restrict_to_frequent_single_dimension_is_unrestricted() -> None:
+    finest = pl.DataFrame({"a": ["x"], "rows": [1], "numerator": [0.0], "denominator": [0.0]})
+    assert restrict_to_frequent(finest, ("a",), {}) is finest
+
+
+def test_restrict_to_frequent_returns_none_when_a_subcut_is_missing() -> None:
+    finest = pl.DataFrame(
+        {"a": ["x"], "b": ["p"], "rows": [1], "numerator": [0.0], "denominator": [0.0]}
+    )
+    assert restrict_to_frequent(finest, ("a", "b"), {("a",): pl.DataFrame({"a": ["x"]})}) is None
+
+
+def test_order_cells_sorts_ascending_with_nulls_last() -> None:
+    cells = pl.DataFrame(
+        {
+            "a": pl.Series(["b", None, "a"], dtype=pl.String),
+            "b": pl.Series(["z", "y", None], dtype=pl.String),
+            "rows": [1, 2, 3],
+        }
+    )
+    assert order_cells(cells, ("a",))["a"].to_list() == ["a", "b", None]
+    assert order_cells(cells, ("b", "a"))["b"].to_list() == ["y", "z", None]
+
+
+def test_format_cells_shapes_output_columns() -> None:
+    cells = pl.DataFrame(
+        {"b": ["p", "q"], "rows": [2, 1], "numerator": [3.0, 1.0], "denominator": [6.0, 0.0]}
+    )
+    result = format_cells(cells, ("b",), ("a", "b"))
+    assert result.schema == empty_cube(("a", "b")).schema
+    assert result.rows() == [
+        (1, "b", None, "p", 2, 3.0, 6.0, 0.5),
+        (1, "b", None, "q", 1, 1.0, 0.0, None),
+    ]
+
+
+def test_empty_cube_schema() -> None:
+    result = empty_cube(("x", "y"))
+    assert result.is_empty()
+    assert result.schema == pl.Schema(
+        {
+            "cut_size": pl.Int64,
+            "cut": pl.String,
+            "x": pl.String,
+            "y": pl.String,
+            "rows": pl.Int64,
+            "numerator": pl.Float64,
+            "denominator": pl.Float64,
+            "ratio": pl.Float64,
+        }
+    )
