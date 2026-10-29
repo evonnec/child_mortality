@@ -1,11 +1,13 @@
 """Measure semantics: nulls (#5), validation (#7) and exact sums / float tolerance (#14).
 
-Tests tagged with an issue number are strict xfails that pin the open defect; they name the
-parameters and messages the issue proposes (``null_measures=``, ``--null-measures``,
-``--on-invalid``, ``--require-match``) and must pass once the fix lands.
+Tests tagged with an issue number are strict xfails that encode the issue's acceptance criteria
+with the names the issue proposes (``null_measures=``, ``--null-measures``, ``--on-invalid``,
+``--require-match``); they must pass once the fix lands. CLI output is compared as numbers, so the
+tests stay valid when integer sums print as ``4`` rather than ``4.0`` (#14).
 """
 
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +24,11 @@ from child_mortality.survey import (
     load_households,
     load_women,
 )
-from conftest import HOUSEHOLD_HEADER, WOMEN_HEADER, write_indexed_csv
+from conftest import DATA_DIR, HOUSEHOLD_HEADER, WOMEN_HEADER, write_indexed_csv
+from mock_helpers import csv_text, last_cell, write_text
 
 AGE = "Age in 5-year groups"
 RES = "Type of place of residence"
-CEB = "Total children ever born"
 
 # --- nulls (#5): the two cases from the issue ---------------------------------------------------
 
@@ -34,9 +36,10 @@ CEB = "Total children ever born"
 CASE_A = [("30-34", "NA", "2", "1"), ("30-34", "2", "0", "1")]
 # Case B: the first woman has one unknown death count.
 CASE_B = [("30-34", "3", "NA", "1"), ("30-34", "3", "1", "1")]
+type Case = list[tuple[str, str, str, str]]
 
 
-def survey_files(tmp_path: Path, women: list[tuple[str, str, str, str]]) -> tuple[Path, Path]:
+def survey_files(tmp_path: Path, women: Case) -> tuple[Path, Path]:
     """One woman per household; ``women`` rows are (age, born, sons died, daughters died)."""
     women_rows = [(str(i), "1", age, b, s, d) for i, (age, b, s, d) in enumerate(women, 1)]
     house_rows = [(str(i), "1", "Urban" if i == 1 else "Rural", "40") for i in range(1, 3)]
@@ -46,7 +49,14 @@ def survey_files(tmp_path: Path, women: list[tuple[str, str, str, str]]) -> tupl
     )
 
 
-def generic_frame(case: list[tuple[str, str, str, str]]) -> pl.DataFrame:
+def cd_ceb_argv(women: Path, households: Path, *extra: str) -> list[str]:
+    argv = ["cd-ceb", "--women", str(women), "--households", str(households)]
+    return [*argv, "-d", AGE, "--max-dims", "1", *extra]
+
+
+def generic_frame(case: Case) -> pl.DataFrame:
+    """The case as a generic table: ``num`` = sons + daughters (null if either is), ``den``."""
+
     def number(text: str) -> int | None:
         return None if text == "NA" else int(text)
 
@@ -68,80 +78,101 @@ def only_row(frame: pl.DataFrame) -> dict[str, Any]:
     return row
 
 
-def test_today_null_denominator_still_adds_its_numerator() -> None:
-    """Pins the defect's mechanism (not an endorsement): numerator 4 over denominator 2."""
-    row = only_row(ratio_cube(generic_frame(CASE_A), ["g"], "num", "den"))
-    assert (row["rows"], row["numerator"], row["denominator"]) == (2, 4.0, 2.0)
-
-
-@pytest.mark.parametrize("case", [CASE_A, CASE_B], ids=["A", "B"])
+@pytest.mark.parametrize(("case", "column"), [(CASE_A, "den"), (CASE_B, "num")], ids=["A", "B"])
 @pytest.mark.xfail(strict=True, reason="#5: default policy must raise on null measures")
-def test_default_policy_errors_on_null_measures(case: list[tuple[str, str, str, str]]) -> None:
-    with pytest.raises(ValueError, match=r"den|num"):
+def test_default_policy_errors_on_null_measures(case: Case, column: str) -> None:
+    with pytest.raises(ValueError, match=rf"\b{column}\b"):
         ratio_cube(generic_frame(case), ["g"], "num", "den")
 
 
 @pytest.mark.xfail(strict=True, reason="#5: error names the column and the affected row count")
 def test_default_policy_message_names_column_and_count() -> None:
-    with pytest.raises(ValueError, match=r"den") as info:
-        ratio_cube(generic_frame(CASE_A), ["g"], "num", "den")
-    assert "1" in str(info.value)
-
-
-@pytest.mark.xfail(strict=True, reason="#5: null_measures='drop' (complete-case) not implemented")
-def test_drop_case_a_is_complete_case() -> None:
-    frame = generic_frame(CASE_A)
-    row = only_row(ratio_cube(frame, ["g"], "num", "den", null_measures="drop"))  # type: ignore[call-arg]
-    assert (row["rows"], row["numerator"], row["denominator"], row["ratio"]) == (1, 1.0, 2.0, 0.5)
-
-
-@pytest.mark.xfail(strict=True, reason="#5: null_measures='drop' (complete-case) not implemented")
-def test_drop_case_b_is_complete_case() -> None:
-    frame = generic_frame(CASE_B)
-    row = only_row(ratio_cube(frame, ["g"], "num", "den", null_measures="drop"))  # type: ignore[call-arg]
-    assert (row["rows"], row["numerator"], row["denominator"]) == (1, 2.0, 3.0)
-    assert row["ratio"] == pytest.approx(2 / 3)
+    frame = pl.DataFrame(
+        {"g": ["x"] * 9, "num": [1] * 9, "den": [None] * 7 + [2, 2]},
+        schema={"g": pl.String, "num": pl.Int64, "den": pl.Int64},
+    )
+    with pytest.raises(ValueError, match=r"\bden\b") as info:
+        ratio_cube(frame, ["g"], "num", "den")
+    assert re.search(r"\b7\b", str(info.value)), str(info.value)
 
 
 @pytest.mark.parametrize(
     ("case", "expected"),
-    [(CASE_A, (2, 4.0, 2.0, 2.0)), (CASE_B, (2, 3.0, 6.0, 0.5))],
+    [(CASE_A, (1, 1, 2, 0.5)), (CASE_B, (1, 2, 3, pytest.approx(2 / 3)))],
     ids=["A", "B"],
 )
-@pytest.mark.xfail(strict=True, reason="#5: null_measures='zero' (opt-in legacy) not implemented")
-def test_zero_reproduces_todays_output(
-    case: list[tuple[str, str, str, str]], expected: tuple[float, ...]
-) -> None:
-    frame = generic_frame(case)
-    row = only_row(ratio_cube(frame, ["g"], "num", "den", null_measures="zero"))  # type: ignore[call-arg]
+@pytest.mark.xfail(strict=True, reason="#5: null_measures='drop' (complete-case) not implemented")
+def test_drop_is_complete_case(case: Case, expected: tuple[Any, ...]) -> None:
+    row = only_row(ratio_cube(generic_frame(case), ["g"], "num", "den", null_measures="drop"))  # type: ignore[call-arg]
     assert (row["rows"], row["numerator"], row["denominator"], row["ratio"]) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="#5: invalid null_measures value must be rejected")
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    # today's ratio_cube on these frames: a null counts as 0 on its own side
+    [(CASE_A, (2, 4, 2, 2.0)), (CASE_B, (2, 2, 6, pytest.approx(1 / 3)))],
+    ids=["A", "B"],
+)
+@pytest.mark.xfail(strict=True, reason="#5: null_measures='zero' (opt-in legacy) not implemented")
+def test_zero_reproduces_todays_output(case: Case, expected: tuple[Any, ...]) -> None:
+    row = only_row(ratio_cube(generic_frame(case), ["g"], "num", "den", null_measures="zero"))  # type: ignore[call-arg]
+    assert (row["rows"], row["numerator"], row["denominator"], row["ratio"]) == expected
+
+
+@pytest.mark.xfail(strict=True, reason="#5: an unknown null_measures value must be rejected")
 def test_unknown_null_policy_is_rejected() -> None:
-    with pytest.raises(ValueError, match="null_measures"):
-        ratio_cube(generic_frame(CASE_A), ["g"], "num", "den", null_measures="ignore")  # type: ignore[call-arg]
+    """Every other argument of ``ratio_cube`` is validated with a ValueError; so is this one."""
+    complete = pl.DataFrame({"g": ["x"], "num": [1], "den": [2]})
+    with pytest.raises(ValueError, match=r"null_measures|ignore"):
+        ratio_cube(complete, ["g"], "num", "den", null_measures="ignore")  # type: ignore[call-arg]
 
 
-@pytest.mark.parametrize("case", [CASE_A, CASE_B], ids=["A", "B"])
 @pytest.mark.xfail(strict=True, reason="#5: cd-ceb must exit 2 on null counts by default")
-def test_cli_default_exits_2_on_null_counts(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], case: list[tuple[str, str, str, str]]
+def test_cli_default_exits_2_naming_the_column_and_count_case_a(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    women, households = survey_files(tmp_path, case)
-    argv = ["cd-ceb", "--women", str(women), "--households", str(households)]
-    assert main([*argv, "-d", AGE, "--max-dims", "1"]) == 2
-    err = capsys.readouterr().err
-    assert len(err.strip().splitlines()) == 1
-    assert "children" in err.lower()
+    assert main(cd_ceb_argv(*survey_files(tmp_path, CASE_A))) == 2
+    (line,) = capsys.readouterr().err.strip().splitlines()
+    assert "Total children ever born" in line
+    assert re.search(r"\b1\b", line), line
 
 
+@pytest.mark.xfail(strict=True, reason="#5: cd-ceb must exit 2 on null counts by default")
+def test_cli_default_exits_2_on_a_null_death_count_case_b(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(cd_ceb_argv(*survey_files(tmp_path, CASE_B))) == 2
+    (line,) = capsys.readouterr().err.strip().splitlines()
+    # the derived column or the raw one, depending on where the policy is applied
+    assert re.search(r"Children died|Sons who have died", line), line
+
+
+@pytest.mark.parametrize(
+    ("case", "ratio"), [(CASE_A, 0.5), (CASE_B, pytest.approx(2 / 3))], ids=["A", "B"]
+)
 @pytest.mark.xfail(strict=True, reason="#5: --null-measures drop not implemented")
-def test_cli_drop_case_a_gives_half(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    women, households = survey_files(tmp_path, CASE_A)
-    argv = ["cd-ceb", "--women", str(women), "--households", str(households)]
-    assert main([*argv, "-d", AGE, "--max-dims", "1", "--null-measures", "drop"]) == 0
-    assert capsys.readouterr().out.splitlines()[-1].endswith(",1,1.0,2.0,0.5")
+def test_cli_drop_is_complete_case(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], case: Case, ratio: Any
+) -> None:
+    argv = cd_ceb_argv(*survey_files(tmp_path, case), "--null-measures", "drop")
+    assert main(argv) == 0
+    rows, *_, got = last_cell(capsys.readouterr().out)
+    assert (rows, got) == (1, ratio)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    # the issue's evidence: today's cd-ceb output for each case
+    [(CASE_A, (2, 4.0, 2.0, 2.0)), (CASE_B, (2, 3.0, 6.0, 0.5))],
+    ids=["A", "B"],
+)
+@pytest.mark.xfail(strict=True, reason="#5: --null-measures zero not implemented")
+def test_cli_zero_reproduces_todays_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], case: Case, expected: tuple[Any, ...]
+) -> None:
+    argv = cd_ceb_argv(*survey_files(tmp_path, case), "--null-measures", "zero")
+    assert main(argv) == 0
+    assert last_cell(capsys.readouterr().out) == expected
 
 
 @pytest.mark.xfail(strict=True, reason="#5: Children died is null when either death count is null")
@@ -159,6 +190,13 @@ def test_survey_library_drop_case_b(tmp_path: Path) -> None:
     assert cube["ratio"].to_list() == pytest.approx([2 / 3])
 
 
+def test_shipped_survey_has_no_null_counts_so_its_numbers_do_not_move() -> None:
+    """#5 must not change the published numbers: the three count columns have no nulls."""
+    women = load_women(DATA_DIR / "women.csv").collect()
+    counts = ("Total children ever born", "Sons who have died", "Daughters who have died")
+    assert [women[c].null_count() for c in counts] == [0, 0, 0]
+
+
 # --- validation (#7) ----------------------------------------------------------------------------
 
 
@@ -172,26 +210,36 @@ def frame_with(num: list[float], den: list[float]) -> pl.DataFrame:
 @pytest.mark.parametrize(
     "bad",
     [
-        pytest.param(frame_with([1, -1], [2, 2]), id="negative-numerator"),
-        pytest.param(frame_with([1, 1], [2, -2]), id="negative-denominator"),
-        pytest.param(frame_with([1.0, float("nan")], [2, 2]), id="nan"),
+        pytest.param(frame_with([1.0, float("nan")], [2, 2]), id="nan-numerator"),
+        pytest.param(frame_with([1.0, 1.0], [2, float("nan")]), id="nan-denominator"),
         pytest.param(frame_with([1.0, float("inf")], [2, 2]), id="inf"),
         pytest.param(frame_with([1.0, 1.0], [2, float("-inf")]), id="-inf"),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="#7: invalid measure values must raise ValueError")
-def test_invalid_measures_are_rejected(bad: pl.DataFrame) -> None:
-    with pytest.raises(ValueError, match=r"num|den"):
+@pytest.mark.xfail(strict=True, reason="#7: ratio-cube measures must be finite")
+def test_non_finite_measures_are_rejected(bad: pl.DataFrame) -> None:
+    with pytest.raises(ValueError, match=r"\b(num|den)\b"):
         ratio_cube(bad, ["g"], "num", "den")
 
 
-def test_today_nan_measure_poisons_the_ratio_silently() -> None:
-    """Pins the mechanism behind #7: NaN flows through to a NaN ratio, rc 0, no error."""
-    out = ratio_cube(frame_with([1.0, float("nan")], [2, 2]), ["g"], "num", "den")
-    assert out["ratio"].is_nan().any()
+def test_ratio_cube_accepts_negative_and_fractional_measures() -> None:
+    """#7 asks only for finite values in ``ratio-cube`` (non-negative integers are a count rule)."""
+    row = only_row(ratio_cube(frame_with([-1.5, 0.5], [2.0, -4.0]), ["g"], "num", "den"))
+    assert (row["rows"], row["numerator"], row["denominator"], row["ratio"]) == (2, -1, -2, 0.5)
 
 
-def death_rows(born: str, sons: str, daughters: str) -> list[tuple[str, str, str, str]]:
+@pytest.mark.parametrize("token", ["nan", "inf", "-inf"])
+@pytest.mark.xfail(strict=True, reason="#7: ratio-cube must reject non-finite values by default")
+def test_cli_rejects_non_finite_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], token: str
+) -> None:
+    path = write_text(tmp_path / "f.csv", csv_text(("g", "num", "den"), [("x", token, "2")]))
+    argv = ["ratio-cube", str(path), "-d", "g", "--numerator", "num", "--denominator", "den"]
+    assert main(argv) == 2
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def death_rows(born: str, sons: str, daughters: str) -> Case:
     return [("30-34", born, sons, daughters), ("30-34", "2", "0", "0")]
 
 
@@ -202,11 +250,9 @@ def death_rows(born: str, sons: str, daughters: str) -> list[tuple[str, str, str
 )
 @pytest.mark.xfail(strict=True, reason="#7: cd-ceb must reject out-of-range counts by default")
 def test_cli_rejects_out_of_range_counts(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], rows: list[tuple[str, str, str, str]]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], rows: Case
 ) -> None:
-    women, households = survey_files(tmp_path, rows)
-    argv = ["cd-ceb", "--women", str(women), "--households", str(households), "-d", AGE]
-    assert main([*argv, "--max-dims", "1"]) == 2
+    assert main(cd_ceb_argv(*survey_files(tmp_path, rows))) == 2
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
 
 
@@ -214,24 +260,61 @@ def test_cli_rejects_out_of_range_counts(
 def test_cli_on_invalid_drop_removes_the_woman(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    women, households = survey_files(tmp_path, death_rows("1", "1", "1"))
-    argv = ["cd-ceb", "--women", str(women), "--households", str(households), "-d", AGE]
-    assert main([*argv, "--max-dims", "1", "--on-invalid", "drop"]) == 0
-    assert capsys.readouterr().out.splitlines()[-1].endswith(",1,0.0,2.0,0.0")
+    argv = cd_ceb_argv(*survey_files(tmp_path, death_rows("1", "1", "1")), "--on-invalid", "drop")
+    assert main(argv) == 0
+    assert last_cell(capsys.readouterr().out) == (1, 0.0, 2.0, 0.0)
 
 
-@pytest.mark.xfail(strict=True, reason="#7: unmatched women must fail with --require-match")
-def test_cli_require_match_fails_on_unmatched_woman(
+def run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    """Exit code and stderr of ``main``; an argparse rejection (SystemExit) counts as an exit."""
+    try:
+        rc = main(argv)
+    except SystemExit as exit_:
+        rc = exit_.code if isinstance(exit_.code, int) else 2
+    return rc, capsys.readouterr().err
+
+
+@pytest.mark.xfail(strict=True, reason="#7: an unmatched woman must fail with --require-match")
+def test_cli_unmatched_woman_fails_when_matching_is_required(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The issue allows ``--require-match`` or making it the default; either passes."""
     women_rows = [("1", "1", "30-34", "2", "0", "1"), ("7", "7", "30-34", "1", "0", "0")]
     women = write_indexed_csv(tmp_path / "w.csv", WOMEN_HEADER, women_rows)
     households = write_indexed_csv(
         tmp_path / "h.csv", HOUSEHOLD_HEADER, [("1", "1", "Urban", "40")]
     )
     argv = ["cd-ceb", "--women", str(women), "--households", str(households), "-d", RES]
-    assert main([*argv, "--require-match"]) == 2
-    assert "match" in capsys.readouterr().err
+    rc, err = run_cli(argv, capsys)
+    if rc == 0:  # matching is opt-in
+        rc, err = run_cli([*argv, "--require-match"], capsys)
+    assert rc == 2
+    assert "unrecognized arguments" not in err
+    assert re.search(r"match|household", err, re.IGNORECASE), err
+
+
+@pytest.mark.xfail(strict=True, reason="#7: data-quality summary on stderr not implemented")
+def test_cli_summary_on_the_shipped_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """8,348 women, 6,290 households, 8,348 joined, 0 unmatched, 0 invalid (with -v or --report)."""
+    argv = [
+        "cd-ceb",
+        "--women",
+        str(DATA_DIR / "women.csv"),
+        "--households",
+        str(DATA_DIR / "household.csv"),
+        "--max-dims",
+        "1",
+        "-o",
+        str(tmp_path / "out.parquet"),
+    ]
+    rc, err = run_cli([*argv, "--report"], capsys)
+    if rc != 0:  # the issue allows either flag
+        rc, err = run_cli([*argv, "-v"], capsys)
+    assert rc == 0
+    for pattern in (r"8,?348", r"6,?290", r"unmatched", r"invalid"):
+        assert re.search(pattern, err, re.IGNORECASE), (pattern, err)
 
 
 # --- exact sums and float tolerance (#14) -------------------------------------------------------
@@ -251,8 +334,8 @@ def test_integer_measures_give_int64_sums() -> None:
 def test_int64_sums_beyond_2_pow_53_are_exact() -> None:
     frame = pl.DataFrame({"g": ["x", "x"], "num": [BIG, 1], "den": [BIG, 1]})
     row = ratio_cube(frame, ["g"], "num", "den").row(0, named=True)
-    assert int(row["numerator"]) == BIG + 1
-    assert int(row["denominator"]) == BIG + 1
+    assert row["numerator"] == BIG + 1
+    assert row["denominator"] == BIG + 1
 
 
 def test_int_sums_below_2_pow_53_are_exact_and_order_independent() -> None:

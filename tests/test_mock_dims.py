@@ -1,4 +1,8 @@
-"""Dimension semantics: natural ordering (#15) and configurable null tokens (#16)."""
+"""Dimension semantics: natural ordering (#15) and configurable null tokens (#16).
+
+#15 asks for grouping and sorting on the original dtype. Categorical is not pinned: polars 2 sorts
+it lexically (there is no physical-order sort any more), which is what today's String cast gives.
+"""
 
 import random
 from pathlib import Path
@@ -73,12 +77,6 @@ def test_enum_order_inside_a_two_dimension_cut() -> None:
     assert out.select("g", "h").rows() == [("low", "x"), ("low", "y"), ("high", "x"), ("high", "y")]
 
 
-@pytest.mark.xfail(strict=True, reason="#15: Categorical dimension uses physical order")
-def test_categorical_dimension_uses_physical_order() -> None:
-    out = ratio_cube(one_dim(["b", "a", "c", "a"], pl.Categorical), ["g"], "num", "den")
-    assert labels(out) == ["b", "a", "c"]
-
-
 @pytest.mark.xfail(strict=True, reason="#15: household size lists 1..24 in numeric order")
 def test_survey_household_size_is_in_numeric_order() -> None:
     out = cd_ceb_cube(
@@ -87,8 +85,7 @@ def test_survey_household_size_is_in_numeric_order() -> None:
         dimensions=["Number of household members"],
     )
     sizes = [int(v) for v in out["Number of household members"].drop_nulls()]
-    assert sizes == sorted(sizes)
-    assert sizes[:3] == [1, 2, 3]
+    assert sizes == list(range(1, 25))
 
 
 def test_string_dimension_order_is_lexicographic_with_nulls_last() -> None:
