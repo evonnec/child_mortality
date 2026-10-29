@@ -524,7 +524,8 @@ def test_output_errors_name_the_output_not_the_temporary_file(
     assert code == 2
     message = assert_one_line_error(capsys)
     assert ".tmp" not in message
-    assert str(tmp_path) in message
+    # OSError shows the path's repr (backslashes doubled on Windows), so match the user's leaf name.
+    assert Path(name).parts[0] in message
 
 
 def test_a_read_only_output_is_not_replaced(tmp_path: Path) -> None:
