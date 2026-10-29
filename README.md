@@ -26,8 +26,11 @@ problems are solved:
    ```
 
    ```python
-   cube = ratio_cube(df, dims[:3], numerator, denominator)
-   # survey: cd_ceb_cube(women, households, dimensions=DIMENSIONS[:3])
+   from child_mortality import cd_ceb_cube
+   from child_mortality.survey import DIMENSIONS
+
+   cube = cd_ceb_cube("data/women.csv", "data/household.csv", dimensions=DIMENSIONS[:3])
+   # any frame: ratio_cube(df, dims[:3], numerator, denominator)
    ```
 
    `--max-dims` is not the same thing: it caps the cut size over *all* listed dimensions.
@@ -63,12 +66,21 @@ This caps cuts at two dimensions over all nine survey dimensions; it is not prob
 problem 1 (every cut of the first k dimensions), pass those k dimensions with `-d` (see above).
 
 Any CSV works with `ratio-cube`. `-d` is repeatable; `--numerator` and `--denominator` name the
-measure columns; every other column is read as a string, and `NA` or empty values are null:
+measure columns; every other column is read as a string, and `NA` or empty values are null. For
+example, the share of household members who are children under 5, cut by residence, electricity
+and radio, keeping only cells with at least 50 households:
 
 ```sh
-uv run child-mortality ratio-cube sales.csv -d region -d channel -d tier \
-    --numerator refunds --denominator orders --max-dims 2 --min-rows 50 -o cube.parquet
+uv run child-mortality ratio-cube data/household.csv \
+    -d "Type of place of residence" -d "Has electricity" -d "Has radio" \
+    --numerator "Number of children 5 and under (de jure)" \
+    --denominator "Number of de jure members" \
+    --max-dims 2 --min-rows 50 -o cube.parquet
 ```
+
+This gives 17 cells, from 0.228 (rural, no radio) down to 0.138 (urban with electricity). The
+30 rural households with electricity (and the cells with a missing value) fall below
+`--min-rows 50` and are left out.
 
 CLI summary (`child-mortality --help` for all flags):
 
@@ -92,9 +104,17 @@ from child_mortality import cd_ceb_cube, ratio_cube
 cube = cd_ceb_cube("data/women.csv", "data/household.csv", max_dims=2, min_rows=30)
 
 # Any polars DataFrame or LazyFrame
-cube = ratio_cube(
-    df, ["region", "channel"], numerator="refunds", denominator="orders", max_dims=2, min_rows=50
+import polars as pl
+
+df = pl.DataFrame(
+    {
+        "region": ["north", "north", "south", "south"],
+        "channel": ["web", "store", "web", "web"],
+        "refunds": [1, 0, 2, 1],
+        "orders": [10, 5, 8, 4],
+    }
 )
+cube = ratio_cube(df, ["region", "channel"], numerator="refunds", denominator="orders")
 ```
 
 `ratio_cube(data, dimensions, numerator, denominator, *, max_dims=None, min_rows=1)` raises
