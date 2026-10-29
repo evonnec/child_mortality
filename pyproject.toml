@@ -1,0 +1,79 @@
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "child-mortality"
+version = "0.1.0"
+description = "Ratio metrics (e.g. children died / children ever born) for every dimensional cut of a table"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "EvonneC" }]
+requires-python = ">=3.15"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+dependencies = ["polars>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/evonnec/child_mortality"
+Repository = "https://github.com/evonnec/child_mortality"
+Issues = "https://github.com/evonnec/child_mortality/issues"
+
+[project.scripts]
+child-mortality = "child_mortality.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.uv.build-backend]
+module-name = "child_mortality"
+
+[tool.ruff]
+target-version = "py315"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PTH", "RET", "C4"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["child_mortality"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.15"
+strict = true
+mypy_path = "src:tests"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = ["--import-mode=importlib", "-ra", "--strict-markers", "--strict-config", "--cov", "--cov-branch"]
+xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+source = ["child_mortality"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:"]
