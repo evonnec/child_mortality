@@ -71,8 +71,9 @@ from child_mortality import cd_ceb_cube, ratio_cube
 cube = cd_ceb_cube("data/women.csv", "data/household.csv", max_dims=2, min_rows=30)
 
 # Any polars DataFrame or LazyFrame
-cube = ratio_cube(df, ["region", "channel"], numerator="refunds", denominator="orders",
-                  max_dims=2, min_rows=50)
+cube = ratio_cube(
+    df, ["region", "channel"], numerator="refunds", denominator="orders", max_dims=2, min_rows=50
+)
 ```
 
 `ratio_cube(data, dimensions, numerator, denominator, *, max_dims=None, min_rows=1)` raises
@@ -165,8 +166,8 @@ join is a left join, so unmatched women would be kept with null household column
 
 Both files have an unnamed leading pandas index column, which is dropped on load. The literal
 `NA` and empty fields are read as null. A null dimension value is its own cell (for example,
-`Time to get to water source (minutes)` is empty for 148 women, and household dimensions contain
-`NA` tokens). Null counts contribute 0 to the sums. 2,187 women have zero children ever born; they
+`Time to get to water source (minutes)` is null for 161 women: 148 empty and 13 `NA`). Null
+counts contribute 0 to the sums. 2,187 women have zero children ever born; they
 count in `rows` and add 0 to both sums.
 
 Assumptions and caveats:
