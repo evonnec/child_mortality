@@ -325,8 +325,8 @@ def test_error_policy_names_every_null_column_with_count_and_first_row() -> None
     )
     with pytest.raises(ValueError) as info:
         ratio_cube(df, ["a"], "n", "d")
-    assert str(info.value).startswith("column 'n' has 2 null rows (first at row 2); column 'd'")
-    assert "has 1 null rows (first at row 1)" in str(info.value)
+    assert str(info.value).startswith("column 'n' is null in 2 rows (first at row 2); column 'd'")
+    assert "is null in 1 row (first at row 1)" in str(info.value)
 
 
 def test_drop_policy_excludes_incomplete_rows_and_logs_the_count(
@@ -361,7 +361,7 @@ def test_null_policy_allows_one_column_as_both_measures_and_a_measure_named_row(
 
 def test_error_policy_reports_the_first_null_row_of_a_column_named_row() -> None:
     df = pl.DataFrame({"a": ["x"] * 3, "row": [1, None, 2], "d": [1, 1, 1]})
-    with pytest.raises(ValueError, match=r"^column 'row' has 1 null rows \(first at row 2\);"):
+    with pytest.raises(ValueError, match=r"^column 'row' is null in 1 row \(first at row 2\);"):
         ratio_cube(df, ["a"], "row", "d")
 
 

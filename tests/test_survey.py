@@ -127,8 +127,8 @@ def test_null_count_error_names_the_raw_column_and_its_row_in_the_women_file(
     with pytest.raises(ValueError) as info:
         cd_ceb_cube(women, households, dimensions=["Type of place of residence"])
     assert str(info.value).startswith(
-        "column 'Total children ever born' has 1 null rows (first at row 3); "
-        "column 'Sons who have died' has 1 null rows (first at row 2); set null_measures"
+        "column 'Total children ever born' is null in 1 row (first at row 3); "
+        "column 'Sons who have died' is null in 1 row (first at row 2); set null_measures"
     )
 
 

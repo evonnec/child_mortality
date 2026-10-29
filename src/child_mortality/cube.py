@@ -140,7 +140,8 @@ def apply_null_policy(
         return data
     if null_measures == "error":
         found = "; ".join(
-            f"column {m!r} has {stats[f'{m}.count']} null rows (first at row {stats[f'{m}.first']})"
+            f"column {m!r} is null in {_rows(stats[f'{m}.count'])}"
+            f" (first at row {stats[f'{m}.first']})"
             for m in measures
             if stats[f"{m}.count"]
         )
@@ -153,6 +154,11 @@ def apply_null_policy(
     if null_measures == "drop":
         return data.drop_nulls(list(measures))
     return data.with_columns(pl.col(*measures).fill_null(0))
+
+
+def _rows(count: int) -> str:
+    """``"1 row"`` or ``"N rows"``."""
+    return f"{count} row" if count == 1 else f"{count} rows"
 
 
 def finest_grain(
