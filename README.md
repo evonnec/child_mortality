@@ -14,8 +14,24 @@ A *cut* is a subset of the dimensions; a *cell* is one combination of values wit
 problems are solved:
 
 1. **Full cube.** For the first `k` dimensions, compute the ratio for every cell of every cut of
-   size 1..`k` (every subset of the dimensions, every value combination that occurs in the data).
-   There is no grand-total row.
+   size 1..`k` (every non-empty subset of those `k` dimensions, every value combination that
+   occurs in the data). There is no grand-total row. Pass only those `k` dimensions and leave
+   `--max-dims` unset. On the survey data with k = 3 (`Age in 5-year groups`,
+   `Type of place of residence`, `Number of household members`) this gives 7 cuts and 555 cells:
+
+   ```sh
+   uv run child-mortality cd-ceb --women data/women.csv --households data/household.csv \
+       -d "Age in 5-year groups" -d "Type of place of residence" \
+       -d "Number of household members" -o problem1.csv
+   ```
+
+   ```python
+   cube = ratio_cube(df, dims[:3], numerator, denominator)
+   # survey: cd_ceb_cube(women, households, dimensions=DIMENSIONS[:3])
+   ```
+
+   `--max-dims` is not the same thing: it caps the cut size over *all* listed dimensions.
+   `cd-ceb --max-dims 3` with the default nine dimensions is 129 cuts and 75,626 cells.
 2. **Thresholded ("iceberg") cube.** With many dimensions the number of cuts and cells explodes,
    so return only cells that contain at least `min_rows` input rows, and avoid computing the rest.
    A finer cell never has more rows than a coarser cell that contains it, so whole branches can
@@ -55,7 +71,7 @@ CLI summary (`child-mortality --help` for all flags):
 | Option | Meaning |
 | --- | --- |
 | `-d/--dimension` | Dimension column, repeatable. Required for `ratio-cube`; `cd-ceb` defaults to the nine survey dimensions. |
-| `--max-dims N` | Largest cut size (default: all dimensions). |
+| `--max-dims N` | Largest cut size, over all listed dimensions (default: all of them). Not "the first N dimensions"; to cut by the first N, list only those with `-d`. |
 | `--min-rows N` | Keep only cells with at least N rows (default 1). |
 | `-o/--output` | `.csv` or `.parquet` by suffix; omitted: CSV on stdout. |
 

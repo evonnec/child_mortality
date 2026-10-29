@@ -73,7 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_cube_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--max-dims", type=int, help="largest cut size (default: all dimensions)")
+    parser.add_argument(
+        "--max-dims",
+        type=int,
+        help="largest cut size, over all listed dimensions (default: all of them)",
+    )
     parser.add_argument(
         "--min-rows", type=int, default=1, help="drop cells with fewer rows (default: %(default)s)"
     )
