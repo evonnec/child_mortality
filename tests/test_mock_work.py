@@ -38,7 +38,7 @@ from child_mortality.survey import (
     load_households,
     load_women,
 )
-from conftest import DATA_DIR, naive_cube
+from conftest import DATA_DIR, assert_matches_oracle, naive_cube
 from mock_helpers import (
     RunawayError,
     Work,
@@ -168,7 +168,7 @@ def test_wide_table_result_is_just_the_frequent_cuts() -> None:
         result = ratio_cube(wide50(), DIMS50, "num", "den", min_rows=40)
     assert result["cut"].unique(maintain_order=True).to_list() == ["a", "b", "a|b"]
     expected = naive_cube(wide50().to_dicts(), DIMS50, "num", "den", min_rows=40, max_dims=2)
-    assert result.equals(pl.DataFrame(expected, schema=result.schema, orient="row"))
+    assert_matches_oracle(result.rows(), expected)
 
 
 def test_dimension_without_frequent_cell_is_never_in_a_deeper_rollup() -> None:
