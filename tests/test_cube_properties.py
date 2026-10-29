@@ -8,7 +8,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from child_mortality.cube import ratio_cube
-from conftest import naive_cube
+from conftest import assert_matches_oracle, naive_cube
 
 PROFILE = settings(max_examples=60, deadline=None, derandomize=False)
 
@@ -43,7 +43,7 @@ def test_matches_naive_oracle(case: tuple[pl.DataFrame, list[str]], data: st.Dat
     expected = naive_cube(
         frame.to_dicts(), dims, "num", "den", max_dims=max_dims, min_rows=min_rows
     )
-    assert actual.rows() == expected
+    assert_matches_oracle(actual.rows(), expected)
 
 
 @PROFILE

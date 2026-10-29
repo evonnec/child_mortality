@@ -18,7 +18,7 @@ from child_mortality.survey import (
     load_households,
     load_women,
 )
-from conftest import DATA_DIR, naive_cube
+from conftest import DATA_DIR, assert_matches_oracle, naive_cube, ratio_matches
 
 WOMEN = DATA_DIR / "women.csv"
 HOUSEHOLDS = DATA_DIR / "household.csv"
@@ -109,12 +109,12 @@ def test_cd_ceb_by_age_group_matches_stdlib_csv(cube3: pl.DataFrame) -> None:
         assert cell["rows"] == rows
         assert cell["numerator"] == died
         assert cell["denominator"] == born
-        assert cell["ratio"] == (died / born if born else None)
+        assert ratio_matches(cell["ratio"], died / born if born else None)
 
 
 def test_max_dims_3_equals_oracle(joined: pl.DataFrame, cube3: pl.DataFrame) -> None:
     expected = naive_cube(joined.to_dicts(), DIMENSIONS, NUMERATOR, DENOMINATOR, max_dims=3)
-    assert cube3.rows() == expected
+    assert_matches_oracle(cube3.rows(), expected)
 
 
 def test_min_rows_invariant_on_real_data(cube3: pl.DataFrame) -> None:
