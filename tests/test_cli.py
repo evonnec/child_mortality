@@ -499,6 +499,60 @@ def test_closed_pipe_prints_nothing_to_stderr(generic_csv: Path) -> None:
     assert stderr == b""
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and unprivileged symlinks")
+def test_write_follows_a_symlink_and_keeps_permissions(tmp_path: Path) -> None:
+    real = tmp_path / "real.csv"
+    real.write_text("previous")
+    real.chmod(0o600)
+    link = tmp_path / "link.csv"
+    link.symlink_to(real)
+    write_cube(pl.DataFrame({"x": [1]}), link)
+    assert link.is_symlink()
+    assert pl.read_csv(real).equals(pl.DataFrame({"x": [1]}))
+    assert real.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("name", ["missing_dir/out.csv", "a_dir.csv"])
+def test_output_errors_name_the_output_not_the_temporary_file(
+    capsys: pytest.CaptureFixture[str], generic_csv: Path, tmp_path: Path, name: str
+) -> None:
+    (tmp_path / "a_dir.csv").mkdir()
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den",
+         "-o", str(tmp_path / name)]
+    )  # fmt: skip
+    assert code == 2
+    message = assert_one_line_error(capsys)
+    assert ".tmp" not in message
+    assert str(tmp_path) in message
+
+
+def test_a_read_only_output_is_not_replaced(tmp_path: Path) -> None:
+    target = tmp_path / "ro.csv"
+    target.write_text("previous")
+    target.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError):
+            write_cube(pl.DataFrame({"x": [1]}), target)
+        assert target.read_text() == "previous"
+    finally:
+        target.chmod(0o644)
+
+
+def test_whitespace_only_error_message_names_the_exception(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, generic_csv: Path
+) -> None:
+    def raise_blank(*args: object, **kwargs: object) -> pl.DataFrame:
+        raise ValueError("   ")
+
+    monkeypatch.setattr("child_mortality.cli.ratio_cube", raise_blank)
+    code = main(
+        ["ratio-cube", str(generic_csv), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    )
+    assert code == 2
+    assert "ValueError" in assert_one_line_error(capsys)
+
+
 # --- package entry points ------------------------------------------------------------------
 
 

@@ -94,11 +94,13 @@ The uv version is pinned in `ci.yml` and `release.yml` (`UV_VERSION`; Renovate b
 Workflow checks run only after a tag exists, so also restrict who can create tags:
 
 - Settings, Rules, Rulesets: add a tag ruleset for the pattern `v*` that restricts creation (and
-  blocks deletion and updates) to maintainers. Without it, anyone with write access can push a tag
-  and start the workflow (it still cannot release a commit that is not on `main`).
+  blocks deletion and updates) to maintainers. This is required: for a tag push GitHub runs the
+  `release.yml` stored in the tagged commit, so the `main` check stops mistakes, not someone with
+  write access acting deliberately.
 - Settings, Environments, `pypi`: **Required reviewers must be enabled** (at least one person
   other than whoever pushes the tag, where the team size allows). This is what stops a single
-  stolen or mistaken tag push from publishing an immutable PyPI release.
+  stolen or mistaken tag push from publishing an immutable PyPI release. Also limit its deployment
+  branches and tags to `main` and `v*`, and keep the PyPI trusted publisher bound to `pypi`.
 
 ## Publishing to PyPI (one-time setup)
 

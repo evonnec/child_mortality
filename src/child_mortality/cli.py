@@ -5,6 +5,7 @@ import contextlib
 import errno
 import os
 import secrets
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -115,13 +116,23 @@ def write_cube(cube: pl.DataFrame, output: Path | None) -> None:
                 raise BrokenPipeError(errno.EPIPE, "stdout was closed") from exc
             raise
         return
-    temporary = output.with_name(f".{output.name}.{secrets.token_hex(4)}.tmp")
+    target = output.resolve()  # replace the file a symlink points at, not the link
+    # Fail the way a plain open() would, naming the user's path rather than the temporary file.
+    if target.is_dir():
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), str(output))
+    if not target.parent.is_dir():
+        raise FileNotFoundError(errno.ENOENT, "no such directory", str(target.parent))
+    if target.exists() and not os.access(target, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(output))
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
     try:
         if output.suffix.lower() == ".parquet":
             cube.write_parquet(temporary)
         else:
             cube.write_csv(temporary)
-        temporary.replace(output)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(target, temporary)  # an existing file keeps its permissions
+        temporary.replace(target)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -173,5 +184,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError, OSError, pl.exceptions.PolarsError:
         exc = sys.exception()
         assert exc is not None
-        return fail(str(exc) or type(exc).__name__)
+        return fail(str(exc).strip() or type(exc).__name__)
     return EXIT_OK
