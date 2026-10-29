@@ -388,8 +388,9 @@ def test_failed_write_keeps_the_previous_file(
 
     monkeypatch.setattr(pl.DataFrame, "write_csv", fail_midway)
     monkeypatch.setattr(pl.DataFrame, "write_parquet", fail_midway)
+    cube = pl.DataFrame({"x": [1]})
     with pytest.raises(OSError, match="disk full"):
-        write_cube(pl.DataFrame({"x": [1]}), target)
+        write_cube(cube, target)
     assert target.read_bytes() == b"previous"
     assert [path.name for path in tmp_path.iterdir()] == [name]
 
@@ -532,9 +533,10 @@ def test_a_read_only_output_is_not_replaced(tmp_path: Path) -> None:
     target = tmp_path / "ro.csv"
     target.write_text("previous")
     target.chmod(0o444)
+    cube = pl.DataFrame({"x": [1]})
     try:
         with pytest.raises(PermissionError):
-            write_cube(pl.DataFrame({"x": [1]}), target)
+            write_cube(cube, target)
         assert target.read_text() == "previous"
     finally:
         target.chmod(0o644)
