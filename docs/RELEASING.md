@@ -87,7 +87,7 @@ Publishing (OIDC), so no API token is stored.
    project name `child-mortality`, owner `evonnec`, repository `child_mortality`, workflow
    `release.yml`, environment `pypi`. The first successful publish creates the project.
 3. In the GitHub repo, Settings, Environments, create an environment named `pypi`.
-   Optionally require reviewer approval, so each publish waits for a manual approval.
+   Optionally add required approvers to the environment, so each publish waits for a manual approval.
 4. Enable the job:
 
    ```sh
