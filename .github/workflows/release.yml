@@ -107,10 +107,9 @@ jobs:
         with:
           name: dist
           path: dist
-      # Renovate (pinDigests) replaces this moving ref with a commit SHA on its first run.
       # skip-existing makes a re-run after a partial upload succeed.
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/
           skip-existing: true
