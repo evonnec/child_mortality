@@ -215,9 +215,11 @@ def test_cut_is_skipped_when_any_one_subcut_is_infrequent(dims: tuple[str, ...])
 
 
 def test_cuts_examined_is_linear_in_frequent_cuts_not_combinatorial() -> None:
-    """Fast in-process signal on today's loop. A rewrite without ``itertools.combinations`` reads 0
-    here; the 50-dimension time budget below is the guard that holds for any implementation.
-    (#4 also bounds the count reported by ``-v``; that needs #8's output format first.)"""
+    """Issue #4's bound on cuts examined, read two ways: candidates drawn with
+    ``itertools.combinations`` from the whole dimension list (the level loop's enumeration; the walk
+    reads 0), and cuts rolled up (every cut the walk examines is rolled up). The 50-dimension time
+    budget below is the guard that holds for any implementation. (#4 also bounds the count reported
+    by ``-v``; that needs #8's output format first.)"""
     work = work_of(
         lambda: ratio_cube(wide50(), DIMS50, "num", "den", min_rows=40),
         max_rollups=WIDE_ROLLUPS,
@@ -228,6 +230,7 @@ def test_cuts_examined_is_linear_in_frequent_cuts_not_combinatorial() -> None:
     # draws its candidates as combinations of the whole dimension list (pool size n); combinations
     # of one cut's own dimensions (sub-cut checks) are not candidates and are not counted.
     assert work.combinations_by_pool[n] <= n * frequent_cuts + n
+    assert work.rollup_calls <= n * frequent_cuts + n
 
 
 def test_all_distinct_dims_stop_after_level_one() -> None:
