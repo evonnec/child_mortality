@@ -7,17 +7,21 @@ since the depth-first walk replaced the level loop. Together with the safety net
 hold for the walk, and each mutation below fails at least one:
 
 * no restriction (every roll-up reads the whole finest grain):
-  ``test_pruning_shrinks_rollup_input_on_skewed_data``, and on today's code also
-  ``test_pruning_shrinks_rollup_input_on_survey_data``;
+  ``test_pruning_shrinks_rollup_input_on_skewed_data``;
+* restricting the finest grain afresh instead of the carried source, or restricting for a cut
+  whose children are all ruled out: ``test_total_rows_scanned_at_min_rows_30_at_most_75_percent``
+  and ``test_no_restriction_for_a_cut_whose_children_are_all_ruled_out``;
 * no cut-level check: ``test_dimension_without_frequent_cell_is_never_in_a_deeper_rollup``.
   Infrequent dimensions sit before, between and after the frequent ones, so this holds for a
   level-wise walk and for a colexicographic one (whose children only add earlier dimensions);
-* no stop at the first empty level (today's loop):
-  ``test_all_distinct_dims_stop_after_level_one``;
+* a cut-level check that looks up only some of the (k-1)-sub-cuts:
+  ``test_cut_is_skipped_when_any_one_subcut_is_infrequent``;
+* no stop once no cut of a size is frequent: ``test_all_distinct_dims_stop_after_level_one``;
 * no shortcut for ``min_rows`` above the table size:
   ``test_min_rows_beyond_table_size_does_no_rollup``.
 """
 
+import itertools
 import math
 import os
 import subprocess
@@ -176,6 +180,36 @@ def test_dimension_without_frequent_cell_is_never_in_a_deeper_rollup() -> None:
         max_combinations=WIDE_COMBINATIONS,
     )
     assert [cut for cut in work.rolled_up_cuts if len(cut) >= 2] == [("a", "b")]
+
+
+def test_no_restriction_for_a_cut_whose_children_are_all_ruled_out() -> None:
+    """Only ``b`` has a child that can be frequent, ``(a, b)``: a restriction made for ``a`` (every
+    dimension before it is infrequent) or for ``(a, b)`` would be read by no roll-up."""
+    work = work_of(
+        lambda: ratio_cube(wide50(), DIMS50, "num", "den", min_rows=40),
+        max_rollups=WIDE_ROLLUPS,
+        max_combinations=WIDE_COMBINATIONS,
+    )
+    assert work.join_calls <= 1
+
+
+@pytest.mark.parametrize("dims", list(itertools.permutations("abc")), ids="".join)
+def test_cut_is_skipped_when_any_one_subcut_is_infrequent(dims: tuple[str, ...]) -> None:
+    """Every dimension and the pairs ``(a, b)`` and ``(b, c)`` have a frequent cell, ``(a, c)`` has
+    none, so ``(a, b, c)`` must not be rolled up. Each dimension order puts the infrequent pair in
+    a different position among the 3-cut's sub-cuts."""
+    table = pl.DataFrame(
+        {
+            "a": ["x", "x", "y", "z"],
+            "b": ["p", "p", "q", "q"],
+            "c": ["1", "2", "3", "3"],
+            "num": [1, 0, 1, 0],
+            "den": [1, 1, 1, 1],
+        }
+    )
+    work = work_of(lambda: ratio_cube(table, list(dims), "num", "den", min_rows=2))
+    assert work.cuts_of_size(3) == set()
+    assert len(work.cuts_of_size(2)) == 3
 
 
 def test_cuts_examined_is_linear_in_frequent_cuts_not_combinatorial() -> None:

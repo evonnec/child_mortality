@@ -160,13 +160,15 @@ order, then the cell's values ascending as strings with nulls last. An empty inp
    the dimension list. This preorder (colexicographic) visits every subset of a cut before the cut
    itself. A child is skipped, with its whole subtree, when any of its (k-1)-sub-cuts has no
    frequent cell; that test is a few set lookups, so no candidate cut is generated except as a
-   child of a frequent one, and there is no C(n, k) enumeration. A frequent cut hands its children
-   a source restricted to its own frequent cells (one semi-join, nulls compare equal so a missing
-   value is a cell of its own); the children roll up that smaller source instead of the whole
-   finest-grain table. At most `max_dims` restricted sources are alive at once. Per-cut results are
-   buffered and assembled in the documented order at the end. If `min_rows` exceeds the total row
-   count nothing is computed. With `min_rows == 1` nothing is pruned or restricted: every cut rolls
-   up from the finest-grain table.
+   child of a frequent one, and there is no C(n, k) enumeration. Every sub-cut of a child other
+   than its parent precedes the parent, so a frequent cut knows its candidate children before
+   visiting any of them; if it has some, it hands them a source restricted to its own frequent
+   cells (one semi-join, nulls compare equal so a missing value is a cell of its own), and the
+   children roll up that smaller source instead of the whole finest-grain table. A cut with no
+   candidate child makes no semi-join. At most `max_dims` restricted sources are alive at once.
+   Per-cut results are buffered and assembled in the documented order at the end. If `min_rows`
+   exceeds the total row count nothing is computed. With `min_rows == 1` nothing is pruned or
+   restricted: every cut rolls up from the finest-grain table.
 
 Complexity notes: with `n` dimensions and `max_dims = m` there are `sum(C(n, k) for k in 1..m)`
 cuts (511 for n = 9, m = 9). The number of cells in a cut is bounded by the number of distinct

@@ -201,27 +201,36 @@ def walk_cuts(
     frequent cell (row counts only shrink as a cut gets finer). Candidates are only the children
     of frequent cuts, never all C(n, k) combinations.
 
-    Each frequent cut hands its children a source restricted to its own frequent cells, so
-    roll-ups read less data with depth. At most ``depth`` restricted sources are alive at once.
-    With ``min_rows == 1`` every cell is frequent and nothing is restricted.
+    A frequent cut with at least one candidate child hands its children a source restricted to
+    its own frequent cells, so roll-ups read less data with depth. At most ``depth`` restricted
+    sources are alive at once. With ``min_rows == 1`` every cell is frequent and nothing is
+    restricted.
     """
     parts: dict[Node, pl.DataFrame] = {}
 
-    def visit(source: pl.DataFrame, parent: Node) -> None:
-        for j in range(parent[0] if parent else len(dims)):
+    def visit(source: pl.DataFrame, parent: Node, extensions: Sequence[int]) -> None:
+        for j in extensions:
             node = (j, *parent)
-            # dropping node[0] gives the parent, frequent by construction; check the other sub-cuts
-            if any(node[:i] + node[i + 1 :] not in parts for i in range(1, len(node))):
-                continue  # a sub-cut has no frequent cell: skip this node and its whole subtree
             cut = tuple(dims[i] for i in node)
             cells = roll_up(source, cut).filter(pl.col("rows") >= min_rows)
             if cells.is_empty():
                 continue
             parts[node] = format_cells(order_cells(cells, cut), cut, dims)
-            if len(node) < depth and j > 0:
-                visit(source if min_rows == 1 else restrict_to_cells(source, cut, cells), node)
+            if len(node) == depth:
+                continue
+            # A child adds i < j. Its sub-cuts other than this node all precede the node in
+            # colexicographic order, so they are decided already: keep the children whose every
+            # sub-cut is frequent, and skip the others with their whole subtrees.
+            children = [
+                i
+                for i in range(j)
+                if all((i, *node[:m], *node[m + 1 :]) in parts for m in range(len(node)))
+            ]
+            if children:  # no restriction for a cut whose children are all ruled out
+                child_source = source if min_rows == 1 else restrict_to_cells(source, cut, cells)
+                visit(child_source, node, children)
 
-    visit(finest, ())
+    visit(finest, (), range(len(dims)))
     return parts
 
 
