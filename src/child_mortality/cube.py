@@ -202,9 +202,9 @@ def walk_cuts(
     of frequent cuts, never all C(n, k) combinations.
 
     A frequent cut with at least one candidate child hands its children a source restricted to
-    its own frequent cells, so roll-ups read less data with depth. At most ``depth`` restricted
-    sources are alive at once. With ``min_rows == 1`` every cell is frequent and nothing is
-    restricted.
+    its own frequent cells and to the columns its subtree can read, so roll-ups read less data
+    with depth. At most ``depth`` restricted sources are alive at once. With ``min_rows == 1``
+    every cell is frequent and no rows are dropped.
     """
     parts: dict[Node, pl.DataFrame] = {}
 
@@ -227,7 +227,11 @@ def walk_cuts(
                 if all((i, *node[:m], *node[m + 1 :]) in parts for m in range(len(node)))
             ]
             if children:  # no restriction for a cut whose children are all ruled out
-                child_source = source if min_rows == 1 else restrict_to_cells(source, cut, cells)
+                # Every cut below this one adds only dims of candidate children (its sub-cut
+                # "this cut + that dim" must be frequent), so the other columns are dropped.
+                child_source = source.select(*(dims[i] for i in children), *cut, *_MEASURES)
+                if min_rows > 1:
+                    child_source = restrict_to_cells(child_source, cut, cells)
                 visit(child_source, node, children)
 
     visit(finest, (), range(len(dims)))

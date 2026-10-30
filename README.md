@@ -163,9 +163,10 @@ order, then the cell's values ascending as strings with nulls last. An empty inp
    child of a frequent one, and there is no C(n, k) enumeration. Every sub-cut of a child other
    than its parent precedes the parent, so a frequent cut knows its candidate children before
    visiting any of them; if it has some, it hands them a source restricted to its own frequent
-   cells (one semi-join, nulls compare equal so a missing value is a cell of its own), and the
-   children roll up that smaller source instead of the whole finest-grain table. A cut with no
-   candidate child makes no semi-join. At most `max_dims` restricted sources are alive at once.
+   cells (one semi-join, nulls compare equal so a missing value is a cell of its own) and to the
+   columns of the dimensions those children add, which are all its subtree can read. The children
+   roll up that smaller source instead of the whole finest-grain table. A cut with no candidate
+   child makes no semi-join. At most `max_dims` restricted sources are alive at once.
    Per-cut results are buffered and assembled in the documented order at the end. If `min_rows`
    exceeds the total row count nothing is computed. With `min_rows == 1` nothing is pruned or
    restricted: every cut rolls up from the finest-grain table.

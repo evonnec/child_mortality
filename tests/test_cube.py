@@ -543,9 +543,9 @@ def test_restrict_to_cells_keeps_rows_inside_the_frequent_cells() -> None:
     assert kept.rows() == [("x", "p"), ("x", "q"), (None, "p")]
 
 
-def test_walk_cuts_skips_a_cut_unless_every_subcut_is_frequent() -> None:
-    # a and c are frequent (4 rows each); b never repeats, so no cut containing b can be.
-    finest = pl.DataFrame(
+def abc_finest() -> pl.DataFrame:
+    """a and c are frequent at min_rows=2 (4 rows each); b never repeats, so no cut with b is."""
+    return pl.DataFrame(
         {
             "a": ["x"] * 4,
             "b": ["1", "2", "3", "4"],
@@ -555,8 +555,27 @@ def test_walk_cuts_skips_a_cut_unless_every_subcut_is_frequent() -> None:
             "denominator": [2.0] * 4,
         }
     )
-    assert walk_cuts(finest, ("a", "b", "c"), 3, 2).keys() == {(0,), (2,), (0, 2)}
-    assert walk_cuts(finest, ("a", "b", "c"), 1, 2).keys() == {(0,), (2,)}
+
+
+def test_walk_cuts_skips_a_cut_unless_every_subcut_is_frequent() -> None:
+    assert walk_cuts(abc_finest(), ("a", "b", "c"), 3, 2).keys() == {(0,), (2,), (0, 2)}
+    assert walk_cuts(abc_finest(), ("a", "b", "c"), 1, 2).keys() == {(0,), (2,)}
+
+
+def test_walk_cuts_hands_children_only_the_columns_their_subtree_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # c's only candidate child is (a, c): b is dropped from the source c hands down.
+    read: dict[tuple[str, ...], list[str]] = {}
+
+    def spy(source: pl.DataFrame, cut: tuple[str, ...]) -> pl.DataFrame:
+        read[cut] = source.columns
+        return roll_up(source, cut)
+
+    monkeypatch.setattr("child_mortality.cube.roll_up", spy)
+    walk_cuts(abc_finest(), ("a", "b", "c"), 3, 2)
+    assert read[("a",)] == abc_finest().columns
+    assert read[("a", "c")] == ["a", "c", "rows", "numerator", "denominator"]
 
 
 def test_order_cells_sorts_ascending_with_nulls_last() -> None:
