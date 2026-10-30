@@ -263,7 +263,7 @@ uv sync
 uv run pytest
 uv run ruff check
 uv run ruff format --check
-uv run mypy src tests
+uv run mypy src tests benchmarks
 ```
 
 The code targets Python 3.15 and uses: PEP 810 explicit lazy imports (`lazy import polars as
