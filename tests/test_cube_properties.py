@@ -4,10 +4,11 @@ from math import comb
 from typing import Any
 
 import polars as pl
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from child_mortality.cube import ratio_cube
+from child_mortality.cube import NullMeasures, ratio_cube
 from conftest import assert_matches_oracle, naive_cube
 
 PROFILE = settings(max_examples=60, deadline=None, derandomize=False)
@@ -39,11 +40,34 @@ def test_matches_naive_oracle(case: tuple[pl.DataFrame, list[str]], data: st.Dat
     frame, dims = case
     max_dims = data.draw(st.integers(min_value=1, max_value=len(dims)))
     min_rows = data.draw(st.integers(min_value=1, max_value=4))
-    actual = ratio_cube(frame, dims, "num", "den", max_dims=max_dims, min_rows=min_rows)
+    policy: NullMeasures = data.draw(st.sampled_from(["drop", "zero"]))
+    actual = ratio_cube(
+        frame, dims, "num", "den", max_dims=max_dims, min_rows=min_rows, null_measures=policy
+    )
     expected = naive_cube(
-        frame.to_dicts(), dims, "num", "den", max_dims=max_dims, min_rows=min_rows
+        frame.to_dicts(),
+        dims,
+        "num",
+        "den",
+        max_dims=max_dims,
+        min_rows=min_rows,
+        null_measures=policy,
     )
     assert_matches_oracle(actual.rows(), expected)
+
+
+@PROFILE
+@given(frames())
+def test_default_policy_raises_exactly_when_a_measure_is_null(
+    case: tuple[pl.DataFrame, list[str]],
+) -> None:
+    frame, dims = case
+    if frame["num"].has_nulls() or frame["den"].has_nulls():
+        with pytest.raises(ValueError, match="null"):
+            ratio_cube(frame, dims, "num", "den")
+    else:
+        actual = ratio_cube(frame, dims, "num", "den")
+        assert_matches_oracle(actual.rows(), naive_cube(frame.to_dicts(), dims, "num", "den"))
 
 
 @PROFILE
@@ -52,8 +76,8 @@ def test_min_rows_is_a_filter_of_the_full_cube(
     case: tuple[pl.DataFrame, list[str]], min_rows: int
 ) -> None:
     frame, dims = case
-    full = ratio_cube(frame, dims, "num", "den")
-    pruned = ratio_cube(frame, dims, "num", "den", min_rows=min_rows)
+    full = ratio_cube(frame, dims, "num", "den", null_measures="zero")
+    pruned = ratio_cube(frame, dims, "num", "den", min_rows=min_rows, null_measures="zero")
     assert pruned.equals(full.filter(pl.col("rows") >= min_rows))
 
 
@@ -61,7 +85,7 @@ def test_min_rows_is_a_filter_of_the_full_cube(
 @given(frames())
 def test_every_one_cut_sums_to_the_grand_totals(case: tuple[pl.DataFrame, list[str]]) -> None:
     frame, dims = case
-    cube = ratio_cube(frame, dims, "num", "den")
+    cube = ratio_cube(frame, dims, "num", "den", null_measures="zero")
     for dim in dims:  # nulls are a cell of their own, so null-free dimensions are covered too
         cells = cube.filter(pl.col("cut") == dim)
         assert cells["rows"].sum() == frame.height
@@ -76,7 +100,7 @@ def test_number_of_cuts_is_sum_of_binomials(
 ) -> None:
     frame, dims = case
     max_dims = data.draw(st.integers(min_value=1, max_value=len(dims)))
-    cube = ratio_cube(frame, dims, "num", "den", max_dims=max_dims)
+    cube = ratio_cube(frame, dims, "num", "den", max_dims=max_dims, null_measures="zero")
     expected = sum(comb(len(dims), k) for k in range(1, max_dims + 1)) if frame.height else 0
     assert cube["cut"].n_unique() == expected
     assert cube["cut_size"].is_sorted()

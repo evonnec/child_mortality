@@ -56,11 +56,30 @@ def naive_cube(
     *,
     max_dims: int | None = None,
     min_rows: int = 1,
+    null_measures: str = "error",
 ) -> list[Row]:
     """Reference implementation: group every cut straight from the raw records.
 
+    ``null_measures`` is the policy for a null numerator or denominator: "error" raises
+    ValueError, "drop" skips the whole record, "zero" counts the null as 0 on its own side.
+
     Returns tuples shaped like ``ratio_cube(...).rows()``.
     """
+    if null_measures not in ("error", "drop", "zero"):
+        raise ValueError(null_measures)
+
+    def incomplete(rec: Record) -> bool:
+        return rec[numerator] is None or rec[denominator] is None
+
+    if null_measures == "error" and any(incomplete(rec) for rec in records):
+        raise ValueError("null measure")
+    if null_measures == "drop":
+        records = [rec for rec in records if not incomplete(rec)]
+    if null_measures == "zero":
+        records = [
+            {**rec, **{m: 0 for m in (numerator, denominator) if rec[m] is None}} for rec in records
+        ]
+    # From here no measure is None: a None would fail the sums below rather than count as 0.
     depth = len(dims) if max_dims is None else max_dims
     out: list[Row] = []
     for size in range(1, depth + 1):
@@ -70,8 +89,8 @@ def naive_cube(
                 key = tuple(None if rec[d] is None else str(rec[d]) for d in cut)
                 acc = cells.setdefault(key, [0, 0, 0])
                 acc[0] += 1
-                acc[1] += rec[numerator] or 0
-                acc[2] += rec[denominator] or 0
+                acc[1] += rec[numerator]
+                acc[2] += rec[denominator]
             for key in sorted(cells, key=_sort_key):
                 rows, num, den = cells[key]
                 if rows < min_rows:

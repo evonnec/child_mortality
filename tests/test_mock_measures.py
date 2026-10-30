@@ -79,13 +79,11 @@ def only_row(frame: pl.DataFrame) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(("case", "column"), [(CASE_A, "den"), (CASE_B, "num")], ids=["A", "B"])
-@pytest.mark.xfail(strict=True, reason="#5: default policy must raise on null measures")
 def test_default_policy_errors_on_null_measures(case: Case, column: str) -> None:
     with pytest.raises(ValueError, match=rf"\b{column}\b"):
         ratio_cube(generic_frame(case), ["g"], "num", "den")
 
 
-@pytest.mark.xfail(strict=True, reason="#5: error names the column and the affected row count")
 def test_default_policy_message_names_column_and_count() -> None:
     frame = pl.DataFrame(
         {"g": ["x"] * 9, "num": [1] * 9, "den": [None] * 7 + [2, 2]},
@@ -101,9 +99,8 @@ def test_default_policy_message_names_column_and_count() -> None:
     [(CASE_A, (1, 1, 2, 0.5)), (CASE_B, (1, 2, 3, pytest.approx(2 / 3)))],
     ids=["A", "B"],
 )
-@pytest.mark.xfail(strict=True, reason="#5: null_measures='drop' (complete-case) not implemented")
 def test_drop_is_complete_case(case: Case, expected: tuple[Any, ...]) -> None:
-    row = only_row(ratio_cube(generic_frame(case), ["g"], "num", "den", null_measures="drop"))  # type: ignore[call-arg]
+    row = only_row(ratio_cube(generic_frame(case), ["g"], "num", "den", null_measures="drop"))
     assert (row["rows"], row["numerator"], row["denominator"], row["ratio"]) == expected
 
 
@@ -113,21 +110,18 @@ def test_drop_is_complete_case(case: Case, expected: tuple[Any, ...]) -> None:
     [(CASE_A, (2, 4, 2, 2.0)), (CASE_B, (2, 2, 6, pytest.approx(1 / 3)))],
     ids=["A", "B"],
 )
-@pytest.mark.xfail(strict=True, reason="#5: null_measures='zero' (opt-in legacy) not implemented")
 def test_zero_reproduces_todays_output(case: Case, expected: tuple[Any, ...]) -> None:
-    row = only_row(ratio_cube(generic_frame(case), ["g"], "num", "den", null_measures="zero"))  # type: ignore[call-arg]
+    row = only_row(ratio_cube(generic_frame(case), ["g"], "num", "den", null_measures="zero"))
     assert (row["rows"], row["numerator"], row["denominator"], row["ratio"]) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="#5: an unknown null_measures value must be rejected")
 def test_unknown_null_policy_is_rejected() -> None:
     """Every other argument of ``ratio_cube`` is validated with a ValueError; so is this one."""
     complete = pl.DataFrame({"g": ["x"], "num": [1], "den": [2]})
     with pytest.raises(ValueError, match=r"null_measures|ignore"):
-        ratio_cube(complete, ["g"], "num", "den", null_measures="ignore")  # type: ignore[call-arg]
+        ratio_cube(complete, ["g"], "num", "den", null_measures="ignore")  # type: ignore[arg-type]
 
 
-@pytest.mark.xfail(strict=True, reason="#5: cd-ceb must exit 2 on null counts by default")
 def test_cli_default_exits_2_naming_the_column_and_count_case_a(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -137,7 +131,6 @@ def test_cli_default_exits_2_naming_the_column_and_count_case_a(
     assert re.search(r"\b1\b", line), line
 
 
-@pytest.mark.xfail(strict=True, reason="#5: cd-ceb must exit 2 on null counts by default")
 def test_cli_default_exits_2_on_a_null_death_count_case_b(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -150,7 +143,6 @@ def test_cli_default_exits_2_on_a_null_death_count_case_b(
 @pytest.mark.parametrize(
     ("case", "ratio"), [(CASE_A, 0.5), (CASE_B, pytest.approx(2 / 3))], ids=["A", "B"]
 )
-@pytest.mark.xfail(strict=True, reason="#5: --null-measures drop not implemented")
 def test_cli_drop_is_complete_case(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], case: Case, ratio: Any
 ) -> None:
@@ -166,7 +158,6 @@ def test_cli_drop_is_complete_case(
     [(CASE_A, (2, 4.0, 2.0, 2.0)), (CASE_B, (2, 3.0, 6.0, 0.5))],
     ids=["A", "B"],
 )
-@pytest.mark.xfail(strict=True, reason="#5: --null-measures zero not implemented")
 def test_cli_zero_reproduces_todays_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], case: Case, expected: tuple[Any, ...]
 ) -> None:
@@ -175,17 +166,15 @@ def test_cli_zero_reproduces_todays_output(
     assert last_cell(capsys.readouterr().out) == expected
 
 
-@pytest.mark.xfail(strict=True, reason="#5: Children died is null when either death count is null")
 def test_children_died_is_null_if_one_death_count_is_null(tmp_path: Path) -> None:
     women, households = survey_files(tmp_path, CASE_B)
     joined = join_women_households(load_women(women), load_households(households)).collect()
     assert joined.sort("Cluster number")[NUMERATOR].to_list() == [None, 2]
 
 
-@pytest.mark.xfail(strict=True, reason="#5: cd_ceb_cube(null_measures='drop') not implemented")
 def test_survey_library_drop_case_b(tmp_path: Path) -> None:
     women, households = survey_files(tmp_path, CASE_B)
-    cube = cd_ceb_cube(women, households, dimensions=[AGE], null_measures="drop")  # type: ignore[call-arg]
+    cube = cd_ceb_cube(women, households, dimensions=[AGE], null_measures="drop")
     assert cube["rows"].to_list() == [1]
     assert cube["ratio"].to_list() == pytest.approx([2 / 3])
 

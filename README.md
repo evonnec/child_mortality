@@ -89,6 +89,7 @@ CLI summary (`child-mortality --help` for all flags):
 | `-d/--dimension` | Dimension column, repeatable. Required for `ratio-cube`; `cd-ceb` defaults to the nine survey dimensions. |
 | `--max-dims N` | Largest cut size, over all listed dimensions (default: all of them). Not "the first N dimensions"; to cut by the first N, list only those with `-d`. |
 | `--min-rows N` | Keep only cells with at least N rows (default 1). |
+| `--null-measures {error,drop,zero}` | What a null numerator or denominator means (default `error`): fail with a one-line message naming the column, the number of affected rows and the first one (1-based data row, header not counted); `drop` leaves such rows out entirely (complete-case); `zero` counts the null as 0 on its own side. For `drop` and `zero` the number of affected rows is printed to stderr. |
 | `-o/--output` | `.csv` or `.parquet` by suffix; omitted: CSV on stdout. An existing file is replaced; the new file is written under a temporary name and moved into place, so a failed write leaves the old file intact. |
 
 Errors (bad arguments, missing files, invalid data) print one line, `child-mortality: error: ...`,
@@ -117,10 +118,15 @@ df = pl.DataFrame(
 cube = ratio_cube(df, ["region", "channel"], numerator="refunds", denominator="orders")
 ```
 
-`ratio_cube(data, dimensions, numerator, denominator, *, max_dims=None, min_rows=1)` raises
+`ratio_cube(data, dimensions, numerator, denominator, *, max_dims=None, min_rows=1,
+null_measures="error")` raises
 `ValueError` for an empty or duplicated dimension list, a dimension name containing `|` or equal
 to an output column name, missing columns, a non-numeric measure, a measure that is also a
-dimension, `max_dims` outside `1..len(dimensions)`, or `min_rows < 1`.
+dimension, `max_dims` outside `1..len(dimensions)`, `min_rows < 1`, an unknown `null_measures`,
+or (with the default `null_measures="error"`) a null in either measure. `cd_ceb_cube` takes the
+same `null_measures`; for `drop` and `zero` the number of affected rows is logged at WARNING by
+the `child_mortality.cube` logger (with no logging configured, Python prints it to stderr), and
+the return value is unchanged.
 
 ## Output schema
 
@@ -131,9 +137,9 @@ One row per cell. Columns, in this order:
 | `cut_size` | Int64 | Number of dimensions in the cut. |
 | `cut` | String | The cut's dimension names joined with `\|`, in the order given in `dimensions`. |
 | one column per dimension | String | The cell's value (cast to String); null when the dimension is not in the cut. A null for a dimension that *is* in the cut means a missing value; `cut` disambiguates. |
-| `rows` | Int64 | Input rows in the cell. |
-| `numerator` | Float64 | Sum of the numerator (null inputs count as 0). |
-| `denominator` | Float64 | Sum of the denominator (null inputs count as 0). |
+| `rows` | Int64 | Input rows in the cell (with `null_measures="drop"`, complete rows only). |
+| `numerator` | Float64 | Sum of the numerator over the rows counted in `rows` (see `null_measures`). |
+| `denominator` | Float64 | Sum of the denominator over the rows counted in `rows` (see `null_measures`). |
 | `ratio` | Float64 | `numerator / denominator`; null when the denominator is 0. |
 
 Ordering is deterministic: by `cut_size`, then cut in `itertools.combinations(dimensions, k)`
@@ -207,9 +213,17 @@ join is a left join, so unmatched women would be kept with null household column
 
 Both files have an unnamed leading pandas index column, which is dropped on load. The literal
 `NA` and empty fields are read as null. A null dimension value is its own cell (for example,
-`Time to get to water source (minutes)` is null for 161 women: 148 empty and 13 `NA`). Null
-counts contribute 0 to the sums. 2,187 women have zero children ever born; they
-count in `rows` and add 0 to both sums.
+`Time to get to water source (minutes)` is null for 161 women: 148 empty and 13 `NA`). The three
+count columns have no nulls in the shipped files. A null count is not silently read as 0,
+because that would sum a numerator and a denominator over different women. The policy
+(`null_measures`, `--null-measures`) is applied to the three count columns of the women's file,
+before `Children died` (sons plus daughters who died) is derived. By default (`error`) a null
+count is an error naming the column as it appears in the women's file, the number of women
+affected and the first one's row in that file (1-based, header not counted). `drop` excludes a
+woman with any unknown count from `rows`, the numerator and the denominator (complete-case);
+`zero` reads each unknown count as 0, so a woman with one unknown death count still adds the
+other. For `drop` and `zero` the number of women with an unknown count is reported. 2,187 women
+have zero children ever born; they count in `rows` and add 0 to both sums.
 
 Assumptions and caveats:
 

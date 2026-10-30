@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 
 from child_mortality.cube import (
+    NullMeasures,
     empty_cube,
     finest_grain,
     format_cells,
@@ -18,6 +19,8 @@ from child_mortality.cube import (
     validate_inputs,
 )
 from conftest import assert_matches_oracle, naive_cube, ratio_matches
+
+POLICIES: tuple[NullMeasures, ...] = ("error", "drop", "zero")
 
 
 def tiny() -> pl.DataFrame:
@@ -297,7 +300,7 @@ def test_zero_denominator_gives_null_ratio() -> None:
     ]
 
 
-def test_null_measures_count_as_zero_but_rows_are_counted() -> None:
+def test_zero_policy_counts_nulls_as_zero_but_rows_are_counted() -> None:
     df = pl.DataFrame(
         {
             "a": ["x", "x", "y"],
@@ -305,11 +308,66 @@ def test_null_measures_count_as_zero_but_rows_are_counted() -> None:
             "d": pl.Series([None, 4, None], dtype=pl.Int64),
         }
     )
-    cube = ratio_cube(df, ["a"], "n", "d")
+    cube = ratio_cube(df, ["a"], "n", "d", null_measures="zero")
     assert cube.rows() == [
         (1, "a", "x", 2, 2.0, 4.0, 0.5),
         (1, "a", "y", 1, 0.0, 0.0, None),
     ]
+
+
+def test_error_policy_names_every_null_column_with_count_and_first_row() -> None:
+    df = pl.DataFrame(
+        {
+            "a": ["x"] * 4,
+            "n": pl.Series([1, None, 3, None], dtype=pl.Int64),
+            "d": pl.Series([None, 2, 2, 2], dtype=pl.Int64),
+        }
+    )
+    with pytest.raises(ValueError) as info:
+        ratio_cube(df, ["a"], "n", "d")
+    assert str(info.value).startswith("column 'n' is null in 2 rows (first at row 2); column 'd'")
+    assert "is null in 1 row (first at row 1)" in str(info.value)
+
+
+def test_drop_policy_excludes_incomplete_rows_and_logs_the_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    df = pl.DataFrame(
+        {
+            "a": ["x", "x", "y"],
+            "n": pl.Series([None, 2, 5], dtype=pl.Int64),
+            "d": pl.Series([3, None, 10], dtype=pl.Int64),
+        }
+    )
+    cube = ratio_cube(df, ["a"], "n", "d", null_measures="drop")
+    assert cube.rows() == [(1, "a", "y", 1, 5.0, 10.0, 0.5)]
+    assert "2 rows have a null measure" in caplog.text
+
+
+def test_complete_data_is_the_same_under_every_policy(caplog: pytest.LogCaptureFixture) -> None:
+    cubes = [ratio_cube(tiny(), ["a", "b"], "num", "den", null_measures=p) for p in POLICIES]
+    assert cubes[0].equals(cubes[1]) and cubes[0].equals(cubes[2])
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("policy", POLICIES)
+def test_null_policy_allows_one_column_as_both_measures_and_a_measure_named_row(
+    policy: NullMeasures,
+) -> None:
+    df = pl.DataFrame({"a": ["x", "x", "y"], "row": [1, 3, 0]})
+    cube = ratio_cube(df, ["a"], "row", "row", null_measures=policy)
+    assert cube.rows() == [(1, "a", "x", 2, 4.0, 4.0, 1.0), (1, "a", "y", 1, 0.0, 0.0, None)]
+
+
+def test_error_policy_reports_the_first_null_row_of_a_column_named_row() -> None:
+    df = pl.DataFrame({"a": ["x"] * 3, "row": [1, None, 2], "d": [1, 1, 1]})
+    with pytest.raises(ValueError, match=r"^column 'row' is null in 1 row \(first at row 2\);"):
+        ratio_cube(df, ["a"], "row", "d")
+
+
+def test_unknown_null_policy_is_a_value_error() -> None:
+    with pytest.raises(ValueError, match="null_measures"):
+        ratio_cube(tiny(), ["a"], "num", "den", null_measures="ignore")  # type: ignore[arg-type]
 
 
 def test_null_dimension_values_form_their_own_cell() -> None:
@@ -441,7 +499,7 @@ def test_finest_grain_aggregates_distinct_combinations() -> None:
             "d": [2] * 4,
         }
     )
-    result = finest_grain(df.lazy(), ("a", "b"), "n", "d").sort("a", "b", nulls_last=True)
+    result = finest_grain(df.lazy(), ("a", "b"), "n", "d", "zero").sort("a", "b", nulls_last=True)
     assert result.columns == ["a", "b", "rows", "numerator", "denominator"]
     assert result.rows() == [
         ("x", "p", 2, 1.0, 4.0),

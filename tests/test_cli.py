@@ -27,15 +27,19 @@ def generic_csv(tmp_path: Path) -> Path:
         ("x", "q", "2", "0"),
         ("y", "p", "3", "6"),
         ("NA", "p", "4", "8"),
-        ("y", "q", "", "NA"),
+        ("y", "q", "5", "1"),
     ]
     return write_csv(tmp_path / "in.csv", ("a", "b", "num", "den"), rows)
 
 
-def run_ok(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
+# The women_csv fixture has two women with an unknown count.
+ZERO_WARNING = "child-mortality: warning: null_measures='zero': 2 rows have a null measure\n"
+
+
+def run_ok(capsys: pytest.CaptureFixture[str], *argv: str, err: str = "") -> str:
     assert main(argv) == 0
     captured = capsys.readouterr()
-    assert captured.err == ""
+    assert captured.err == err
     return captured.out
 
 
@@ -72,7 +76,7 @@ def test_ratio_cube_to_stdout(capsys: pytest.CaptureFixture[str], generic_csv: P
     expected = expected_generic(generic_csv)
     assert out == expected.write_csv()
     assert out.splitlines()[0] == "cut_size,cut,a,b,rows,numerator,denominator,ratio"
-    # NA / empty cells became nulls, so the "y|q" row contributes 0 to both measures.
+    # the NA dimension value became a null cell
     assert pl.read_csv(out.encode(), schema=expected.schema).equals(expected)
 
 
@@ -81,9 +85,9 @@ def test_cd_ceb_to_stdout(
 ) -> None:
     out = run_ok(
         capsys, "cd-ceb", "--women", str(women_csv), "--households", str(households_csv),
-        "-d", DIM,
+        "-d", DIM, "--null-measures", "zero", err=ZERO_WARNING,
     )  # fmt: skip
-    expected = cd_ceb_cube(women_csv, households_csv, dimensions=[DIM])
+    expected = cd_ceb_cube(women_csv, households_csv, dimensions=[DIM], null_measures="zero")
     assert out == expected.write_csv()
 
 
@@ -93,9 +97,14 @@ def test_repeatable_dimension_flag_keeps_order(
     out = run_ok(
         capsys, "cd-ceb", "--women", str(women_csv), "--households", str(households_csv),
         "-d", DIM, "--dimension", "Age in 5-year groups", "--max-dims", "2", "--min-rows", "1",
+        "--null-measures", "zero", err=ZERO_WARNING,
     )  # fmt: skip
     expected = cd_ceb_cube(
-        women_csv, households_csv, dimensions=[DIM, "Age in 5-year groups"], max_dims=2
+        women_csv,
+        households_csv,
+        dimensions=[DIM, "Age in 5-year groups"],
+        max_dims=2,
+        null_measures="zero",
     )
     assert out == expected.write_csv()
     assert out.splitlines()[0].startswith(f"cut_size,cut,{DIM},Age in 5-year groups,rows")
@@ -122,7 +131,12 @@ def test_cd_ceb_defaults_to_survey_dimensions(monkeypatch: pytest.MonkeyPatch) -
     assert main(["cd-ceb", "--women", "w.csv", "--households", "h.csv"]) == 0
     from child_mortality.survey import DIMENSIONS
 
-    assert seen == {"dimensions": DIMENSIONS, "max_dims": None, "min_rows": 1}
+    assert seen == {
+        "dimensions": DIMENSIONS,
+        "max_dims": None,
+        "min_rows": 1,
+        "null_measures": "error",
+    }
 
 
 def test_min_rows_and_max_dims_options(
@@ -172,9 +186,12 @@ def test_parquet_output_file(
     out = run_ok(
         capsys, "cd-ceb", "--women", str(women_csv), "--households", str(households_csv),
         "-d", DIM, "-d", "Age in 5-year groups", "--output", str(out_path),
+        "--null-measures", "zero", err=ZERO_WARNING,
     )  # fmt: skip
     assert out == ""
-    expected = cd_ceb_cube(women_csv, households_csv, dimensions=[DIM, "Age in 5-year groups"])
+    expected = cd_ceb_cube(
+        women_csv, households_csv, dimensions=[DIM, "Age in 5-year groups"], null_measures="zero"
+    )
     assert pl.read_parquet(out_path).equals(expected)
 
 
@@ -188,13 +205,33 @@ def test_empty_result_is_still_written(
     assert out == "cut_size,cut,a,rows,numerator,denominator,ratio\n"
 
 
-def test_read_generic_types(generic_csv: Path) -> None:
-    frame = read_generic(generic_csv, "num", "den").collect()
+def test_null_measures_count_is_reported_on_stderr(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    rows = [("x", "1", "2"), ("x", "", "4"), ("y", "3", "NA")]
+    path = write_csv(tmp_path / "in.csv", ("a", "num", "den"), rows)
+    argv = ["ratio-cube", str(path), "-d", "a", "--numerator", "num", "--denominator", "den"]
+    assert main([*argv, "--null-measures", "drop"]) == 0
+    captured = capsys.readouterr()
+    assert (
+        captured.err
+        == "child-mortality: warning: null_measures='drop': 2 rows have a null measure\n"
+    )
+    assert captured.out.splitlines()[1:] == ["1,a,x,1,1.0,2.0,0.5"]
+    assert main(argv) == 2
+    assert capsys.readouterr().err.count("\n") == 1
+
+
+def test_read_generic_types(tmp_path: Path) -> None:
+    rows = [("x", "p", "1", "2"), ("NA", "p", "4", "8"), ("y", "q", "", "NA")]
+    path = write_csv(tmp_path / "in.csv", ("a", "b", "num", "den"), rows)
+    frame = read_generic(path, "num", "den").collect()
     assert frame.schema == pl.Schema(
         {"a": pl.String, "b": pl.String, "num": pl.Float64, "den": pl.Float64}
     )
     assert frame["a"].null_count() == 1
-    assert frame["num"].to_list() == [1.0, 2.0, 3.0, 4.0, None]
+    assert frame["num"].to_list() == [1.0, 4.0, None]
+    assert frame["den"].to_list() == [2.0, 8.0, None]
 
 
 def test_write_cube_stdout_and_files(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
