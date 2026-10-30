@@ -6,11 +6,10 @@ The tests that were strict xfails tagged ``#4`` (pruning added work instead of a
 since the depth-first walk replaced the level loop. Together with the safety net #6 asks for, they
 hold for the walk, and each mutation below fails at least one:
 
-* no restriction (every roll-up reads the whole finest grain):
-  ``test_pruning_shrinks_rollup_input_on_skewed_data``;
-* restricting the finest grain afresh instead of the carried source, or restricting for a cut
-  whose children are all ruled out: ``test_total_rows_scanned_at_min_rows_30_at_most_75_percent``
-  and ``test_no_restriction_for_a_cut_whose_children_are_all_ruled_out``;
+* no restriction (every roll-up reads the whole finest grain), or restricting the finest grain
+  afresh instead of the carried source: ``test_pruning_shrinks_rollup_input_on_skewed_data``;
+* restricting for a cut whose children are all ruled out:
+  ``test_no_restriction_for_a_cut_whose_children_are_all_ruled_out``;
 * restricting even when the semi-join drops nothing:
   ``test_no_restriction_when_every_cell_is_frequent``;
 * no cut-level check: ``test_dimension_without_frequent_cell_is_never_in_a_deeper_rollup``.
