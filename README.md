@@ -162,23 +162,26 @@ order, then the cell's values ascending as strings with nulls last. An empty inp
    frequent cell; that test is a few set lookups, so no candidate cut is generated except as a
    child of a frequent one, and there is no C(n, k) enumeration. Every sub-cut of a child other
    than its parent precedes the parent, so a frequent cut knows its candidate children before
-   visiting any of them; if it has some, it hands them a source restricted to its own frequent
-   cells (one semi-join, nulls compare equal so a missing value is a cell of its own) and to the
-   columns of the dimensions those children add, which are all its subtree can read. The children
-   roll up that smaller source instead of the whole finest-grain table. A cut with no candidate
-   child makes no semi-join. At most `max_dims` restricted sources are alive at once.
-   Per-cut results are buffered and assembled in the documented order at the end. If `min_rows`
-   exceeds the total row count nothing is computed. With `min_rows == 1` nothing is pruned or
-   restricted: every cut rolls up from the finest-grain table.
+   visiting any of them; if it has some, it hands them a source restricted to the columns of the
+   dimensions those children add (all its subtree can read) and to its own frequent cells (one
+   semi-join, nulls compare equal so a missing value is a cell of its own). The children roll up
+   that smaller source instead of the whole finest-grain table. A semi-join costs about as much as
+   a roll-up of the same source, so it is made only when the source rows it drops, times the
+   number of candidate children, reach the size of the source; otherwise the children read the
+   unrestricted rows and a deeper cut drops them. A cut with no candidate child makes no
+   semi-join. At most `max_dims` restricted sources are alive at once. Per-cut results are
+   buffered and assembled in the documented order at the end. If `min_rows` exceeds the total row
+   count nothing is computed. With `min_rows == 1` nothing is pruned or restricted: every cut rolls
+   up from the finest-grain table.
 
 Complexity notes: with `n` dimensions and `max_dims = m` there are `sum(C(n, k) for k in 1..m)`
 cuts (511 for n = 9, m = 9). The number of cells in a cut is bounded by the number of distinct
 value combinations of its dimensions, and the exhaustive work is bounded by cuts times the size of
 the finest-grain table, which is at most the number of input rows and in practice much smaller for
 low-cardinality dimensions. With `min_rows > 1` the work follows the output instead: a cut costs
-one roll-up of its parent's restricted source plus one semi-join, only cuts whose every sub-cut is
-frequent are rolled up (plus one cheap lookup per dimension for each frequent cut), and memory is
-the finest-grain table, at most `max_dims` restricted copies of it, and the output. On 50
+one roll-up of its parent's restricted source plus at most one semi-join, only cuts whose every
+sub-cut is frequent are rolled up (plus one cheap lookup per dimension for each frequent cut), and
+memory is the finest-grain table, at most `max_dims` restricted copies of it, and the output. On 50
 dimensions of which 10 are binary and 40 have 5,000 values, 80,000 rows and `min_rows=100`
 (1,023 frequent cuts, 58,024 cells) it takes about 5 s and 0.9 GB. `benchmarks/pruning.py`
 reproduces these numbers (`uv run python benchmarks/pruning.py`; not part of the test run).

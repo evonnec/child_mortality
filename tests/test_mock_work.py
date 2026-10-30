@@ -11,6 +11,8 @@ hold for the walk, and each mutation below fails at least one:
 * restricting the finest grain afresh instead of the carried source, or restricting for a cut
   whose children are all ruled out: ``test_total_rows_scanned_at_min_rows_30_at_most_75_percent``
   and ``test_no_restriction_for_a_cut_whose_children_are_all_ruled_out``;
+* restricting even when the semi-join drops nothing:
+  ``test_no_restriction_when_every_cell_is_frequent``;
 * no cut-level check: ``test_dimension_without_frequent_cell_is_never_in_a_deeper_rollup``.
   Infrequent dimensions sit before, between and after the frequent ones, so this holds for a
   level-wise walk and for a colexicographic one (whose children only add earlier dimensions);
@@ -243,6 +245,14 @@ def test_min_rows_beyond_table_size_does_no_rollup() -> None:
     table = wide_table(40, ["a", "b"], 3)
     work = work_of(lambda: ratio_cube(table, ["a", "b", "u00"], "num", "den", min_rows=41))
     assert work.rollup_calls == 0
+    assert work.join_calls == 0
+
+
+def test_no_restriction_when_every_cell_is_frequent() -> None:
+    """Every cell of every cut has at least 4 of the 64 rows: a semi-join would keep everything."""
+    table = wide_table(64, ["a", "b", "c", "d"], 0)
+    work = work_of(lambda: ratio_cube(table, ["a", "b", "c", "d"], "num", "den", min_rows=2))
+    assert work.rollup_calls == 15
     assert work.join_calls == 0
 
 

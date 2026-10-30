@@ -522,7 +522,8 @@ def test_roll_up_sums_measures_over_cut_cells() -> None:
         }
     )
     result = roll_up(source, ("a",)).sort("a")
-    assert result.rows() == [("x", 3, 3.0, 9.0), ("y", 4, 3.0, 6.0)]
+    # the last column counts the source rows in each cell
+    assert result.rows() == [("x", 3, 3.0, 9.0, 2), ("y", 4, 3.0, 6.0, 1)]
     assert roll_up(source, ("a", "b")).height == 3
 
 
@@ -560,6 +561,13 @@ def abc_finest() -> pl.DataFrame:
 def test_walk_cuts_skips_a_cut_unless_every_subcut_is_frequent() -> None:
     assert walk_cuts(abc_finest(), ("a", "b", "c"), 3, 2).keys() == {(0,), (2,), (0, 2)}
     assert walk_cuts(abc_finest(), ("a", "b", "c"), 1, 2).keys() == {(0,), (2,)}
+
+
+def test_a_dimension_may_share_a_name_with_the_internal_group_count() -> None:
+    df = pl.DataFrame({"groups": ["x", "x", "y"], "n": [1, 0, 1], "d": [1, 1, 1]})
+    cube = ratio_cube(df, ["groups"], "n", "d", min_rows=2)
+    assert cube.columns[2:4] == ["groups", "rows"]
+    assert cube.rows() == [(1, "groups", "x", 2, 1.0, 2.0, 0.5)]
 
 
 def test_walk_cuts_hands_children_only_the_columns_their_subtree_reads(

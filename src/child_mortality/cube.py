@@ -20,6 +20,8 @@ type Node = tuple[int, ...]
 
 CUT_SEPARATOR = "|"
 _MEASURES = ("rows", "numerator", "denominator")
+# Rows of the source in a rolled-up cell; the separator keeps it apart from every dimension name.
+_GROUPS = f"{CUT_SEPARATOR}groups"
 # Output column names a dimension may not take.
 _RESERVED = ("cut_size", "cut", *_MEASURES, "ratio")
 
@@ -176,8 +178,11 @@ def finest_grain(
 
 
 def roll_up(source: pl.DataFrame, cut: Cut) -> pl.DataFrame:
-    """Sum the measures of ``source`` (finest grain or a subset of it) over the cut's cells."""
-    return source.group_by(cut).agg(pl.col(*_MEASURES).sum())
+    """Sum the measures of ``source`` (finest grain or a subset of it) over the cut's cells.
+
+    Also counts the rows of ``source`` in each cell: what a restriction to the cell keeps.
+    """
+    return source.group_by(cut).agg(pl.col(*_MEASURES).sum(), pl.len().alias(_GROUPS))
 
 
 def restrict_to_cells(source: pl.DataFrame, cut: Cut, cells: pl.DataFrame) -> pl.DataFrame:
@@ -202,9 +207,9 @@ def walk_cuts(
     of frequent cuts, never all C(n, k) combinations.
 
     A frequent cut with at least one candidate child hands its children a source restricted to
-    its own frequent cells and to the columns its subtree can read, so roll-ups read less data
-    with depth. At most ``depth`` restricted sources are alive at once. With ``min_rows == 1``
-    every cell is frequent and no rows are dropped.
+    the columns its subtree can read and, when that pays for the semi-join, to its own frequent
+    cells, so roll-ups read less data with depth. At most ``depth`` restricted sources are alive
+    at once. With ``min_rows == 1`` every cell is frequent and no rows are dropped.
     """
     parts: dict[Node, pl.DataFrame] = {}
 
@@ -230,7 +235,10 @@ def walk_cuts(
                 # Every cut below this one adds only dims of candidate children (its sub-cut
                 # "this cut + that dim" must be frequent), so the other columns are dropped.
                 child_source = source.select(*(dims[i] for i in children), *cut, *_MEASURES)
-                if min_rows > 1:
+                # A semi-join costs about one roll-up of the source and saves each child's roll-up
+                # the rows it drops: make it only when that adds up to at least its cost.
+                dropped = source.height - cells[_GROUPS].sum()
+                if dropped * len(children) >= source.height:
                     child_source = restrict_to_cells(child_source, cut, cells)
                 visit(child_source, node, children)
 
