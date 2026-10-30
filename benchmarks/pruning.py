@@ -9,6 +9,10 @@ Run from the repository root (not part of the default test run)::
 ``ratio_cube`` with ``min_rows`` is compared with the baseline "compute everything
 (``min_rows=1``), then filter". The baseline is skipped where it cannot finish (all depths on 12
 dimensions, 50 dimensions). The last section checks the issue's targets.
+
+Each case runs in a fresh process. Its time is the best of ``REPEAT`` runs on a frame built once,
+outside the timer, so a target with a thin margin is not decided by one noisy sample. Its peak RSS
+is the whole process's after the first run, so it includes polars and building the input frame.
 """
 
 import argparse
@@ -35,6 +39,7 @@ from child_mortality.survey import (
 
 DATA = Path(__file__).parent.parent / "data"
 MB = 1024 * 1024  # ru_maxrss is in bytes on macOS (kilobytes on Linux, handled below)
+REPEAT = 3
 
 
 def peak_rss_mb() -> float:
@@ -79,7 +84,7 @@ type Row = tuple[str, *tuple[dict[str, float] | None, ...]]
 
 
 def run_case(name: str, mode: str, min_rows: int, max_dims: int | None) -> dict[str, float]:
-    """Time one computation (the frame is built first, outside the timer); child-process entry."""
+    """Best of ``REPEAT`` timed runs (the frame is built first, outside the timer); child entry."""
     builders: dict[str, Builder] = {
         "survey": survey_frame,
         "100k": lambda: skewed_frame(100_000),
@@ -93,15 +98,21 @@ def run_case(name: str, mode: str, min_rows: int, max_dims: int | None) -> dict[
         dims, num, den = list(DIMENSIONS), NUMERATOR, DENOMINATOR
     else:
         dims, num, den = [c for c in frame.columns if c not in ("num", "den")], "num", "den"
-    start = time.perf_counter()
-    if mode == "iceberg":
-        out = ratio_cube(frame, dims, num, den, max_dims=max_dims, min_rows=min_rows)
-    else:
-        out = ratio_cube(frame, dims, num, den, max_dims=max_dims).filter(
-            pl.col("rows") >= min_rows
-        )
-    seconds = time.perf_counter() - start
-    return {"cells": out.height, "seconds": seconds, "rss_mb": peak_rss_mb()}
+    seconds, cells, rss_mb = float("inf"), 0, 0.0
+    for run in range(REPEAT):
+        start = time.perf_counter()
+        if mode == "iceberg":
+            out = ratio_cube(frame, dims, num, den, max_dims=max_dims, min_rows=min_rows)
+        else:
+            out = ratio_cube(frame, dims, num, den, max_dims=max_dims).filter(
+                pl.col("rows") >= min_rows
+            )
+        seconds = min(seconds, time.perf_counter() - start)
+        cells = out.height
+        if run == 0:  # later runs reuse a fragmented heap, which inflates the high-water mark
+            rss_mb = peak_rss_mb()
+        del out
+    return {"cells": cells, "seconds": seconds, "rss_mb": rss_mb}
 
 
 def measure(name: str, mode: str, min_rows: int, max_dims: int | None) -> dict[str, float]:

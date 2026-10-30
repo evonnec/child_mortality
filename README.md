@@ -183,8 +183,9 @@ one roll-up of its parent's restricted source plus at most one semi-join, only c
 sub-cut is frequent are rolled up (plus one cheap lookup per dimension for each frequent cut), and
 memory is the finest-grain table, at most `max_dims` restricted copies of it, and the output. On 50
 dimensions of which 10 are binary and 40 have 5,000 values, 80,000 rows and `min_rows=100`
-(1,023 frequent cuts, 58,024 cells) it takes about 5 s and 0.9 GB. `benchmarks/pruning.py`
-reproduces these numbers (`uv run python benchmarks/pruning.py`; not part of the test run).
+(1,022 frequent cuts, every subset of the binary dimensions up to 9 of them; 58,024 cells) it
+takes about 2 s and 0.4 GB. `benchmarks/pruning.py` reproduces these numbers
+(`uv run python benchmarks/pruning.py`; not part of the test run).
 
 ## Results on the survey data
 
@@ -208,14 +209,14 @@ reading, join and cube; excludes writing output), polars on a laptop, three runs
 
 | Run | Output rows | Time | Peak RSS |
 | --- | ---: | ---: | ---: |
-| all 9 dims, `min_rows=1` | 1,546,271 | 0.6 s | about 370 MB |
-| all 9 dims, `--min-rows 2` | 568,579 | 0.6 s | about 215 MB |
-| all 9 dims, `--min-rows 30` | 11,706 | 0.3 s | about 130 MB |
-| all 9 dims, `--min-rows 100` | 2,447 | 0.2 s | about 130 MB |
+| all 9 dims, `min_rows=1` | 1,546,271 | 0.6 s | about 375 MB |
+| all 9 dims, `--min-rows 2` | 568,579 | 0.5 s | about 205 MB |
+| all 9 dims, `--min-rows 30` | 11,706 | 0.25 s | about 130 MB |
+| all 9 dims, `--min-rows 100` | 2,447 | 0.17 s | about 125 MB |
 
-Compared with computing the whole cube and filtering (0.6 s, about 690 MB for the cube step alone),
-the thresholded run is no slower at `--min-rows 2` and about 1.3x, 2.5x and 3.7x faster at 5, 30
-and 100 (`benchmarks/pruning.py`).
+Compared with computing the whole cube and filtering (0.55 s, about 690 MB for the cube step
+alone), the thresholded run is about 1.2x faster at `--min-rows 2` and about 1.6x, 3x and 5x
+faster at 5, 30 and 100 (`benchmarks/pruning.py`, best of three runs).
 
 With `--min-rows 30` the largest surviving cut has 6 dimensions (cells per cut size 1..6: 135,
 1,517, 4,212, 4,192, 1,526, 124). Absolute numbers depend on the machine, core count and polars
