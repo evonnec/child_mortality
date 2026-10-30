@@ -14,9 +14,10 @@ from child_mortality.cube import (
     format_cells,
     order_cells,
     ratio_cube,
-    restrict_to_frequent,
+    restrict_to_cells,
     roll_up,
     validate_inputs,
+    walk_cuts,
 )
 from conftest import assert_matches_oracle, naive_cube, ratio_matches
 
@@ -521,12 +522,13 @@ def test_roll_up_sums_measures_over_cut_cells() -> None:
         }
     )
     result = roll_up(source, ("a",)).sort("a")
-    assert result.rows() == [("x", 3, 3.0, 9.0), ("y", 4, 3.0, 6.0)]
+    # the last column counts the source rows in each cell
+    assert result.rows() == [("x", 3, 3.0, 9.0, 2), ("y", 4, 3.0, 6.0, 1)]
     assert roll_up(source, ("a", "b")).height == 3
 
 
-def test_restrict_to_frequent_semi_joins_on_every_subcut() -> None:
-    finest = pl.DataFrame(
+def test_restrict_to_cells_keeps_rows_inside_the_frequent_cells() -> None:
+    source = pl.DataFrame(
         {
             "a": pl.Series(["x", "x", "y", None], dtype=pl.String),
             "b": ["p", "q", "p", "p"],
@@ -535,27 +537,53 @@ def test_restrict_to_frequent_semi_joins_on_every_subcut() -> None:
             "denominator": [0.0] * 4,
         }
     )
-    frequent: dict[tuple[str, ...], pl.DataFrame] = {
-        ("a",): pl.DataFrame({"a": pl.Series(["x", None], dtype=pl.String)}),
-        ("b",): pl.DataFrame({"b": ["p"]}),
-    }
-    result = restrict_to_frequent(finest, ("a", "b"), frequent)
-    assert result is not None
-    # (x, q) fails on b; (y, p) fails on a; the null a-cell matches the null key.
-    kept = result.select("a", "b").sort("a", nulls_last=True)
-    assert kept.rows() == [("x", "p"), (None, "p")]
+    cells = pl.DataFrame({"a": pl.Series(["x", None], dtype=pl.String), "rows": [5, 5]})
+    result = restrict_to_cells(source, ("a",), cells)
+    # (y, p) is outside the frequent cells; the null a-cell matches the null key.
+    kept = result.select("a", "b").sort("a", "b", nulls_last=True)
+    assert kept.rows() == [("x", "p"), ("x", "q"), (None, "p")]
 
 
-def test_restrict_to_frequent_single_dimension_is_unrestricted() -> None:
-    finest = pl.DataFrame({"a": ["x"], "rows": [1], "numerator": [0.0], "denominator": [0.0]})
-    assert restrict_to_frequent(finest, ("a",), {}) is finest
-
-
-def test_restrict_to_frequent_returns_none_when_a_subcut_is_missing() -> None:
-    finest = pl.DataFrame(
-        {"a": ["x"], "b": ["p"], "rows": [1], "numerator": [0.0], "denominator": [0.0]}
+def abc_finest() -> pl.DataFrame:
+    """a and c are frequent at min_rows=2 (4 rows each); b never repeats, so no cut with b is."""
+    return pl.DataFrame(
+        {
+            "a": ["x"] * 4,
+            "b": ["1", "2", "3", "4"],
+            "c": ["z"] * 4,
+            "rows": [1] * 4,
+            "numerator": [1.0] * 4,
+            "denominator": [2.0] * 4,
+        }
     )
-    assert restrict_to_frequent(finest, ("a", "b"), {("a",): pl.DataFrame({"a": ["x"]})}) is None
+
+
+def test_walk_cuts_skips_a_cut_unless_every_subcut_is_frequent() -> None:
+    assert walk_cuts(abc_finest(), ("a", "b", "c"), 3, 2).keys() == {(0,), (2,), (0, 2)}
+    assert walk_cuts(abc_finest(), ("a", "b", "c"), 1, 2).keys() == {(0,), (2,)}
+
+
+def test_a_dimension_may_share_a_name_with_the_internal_group_count() -> None:
+    df = pl.DataFrame({"groups": ["x", "x", "y"], "n": [1, 0, 1], "d": [1, 1, 1]})
+    cube = ratio_cube(df, ["groups"], "n", "d", min_rows=2)
+    assert cube.columns[2:4] == ["groups", "rows"]
+    assert cube.rows() == [(1, "groups", "x", 2, 1.0, 2.0, 0.5)]
+
+
+def test_walk_cuts_hands_children_only_the_columns_their_subtree_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # c's only candidate child is (a, c): b is dropped from the source c hands down.
+    read: dict[tuple[str, ...], list[str]] = {}
+
+    def spy(source: pl.DataFrame, cut: tuple[str, ...]) -> pl.DataFrame:
+        read[cut] = source.columns
+        return roll_up(source, cut)
+
+    monkeypatch.setattr("child_mortality.cube.roll_up", spy)
+    walk_cuts(abc_finest(), ("a", "b", "c"), 3, 2)
+    assert read[("a",)] == abc_finest().columns
+    assert read[("a", "c")] == ["a", "c", "rows", "numerator", "denominator"]
 
 
 def test_order_cells_sorts_ascending_with_nulls_last() -> None:

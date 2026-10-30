@@ -78,7 +78,11 @@ def test_min_rows_is_a_filter_of_the_full_cube(
     frame, dims = case
     full = ratio_cube(frame, dims, "num", "den", null_measures="zero")
     pruned = ratio_cube(frame, dims, "num", "den", min_rows=min_rows, null_measures="zero")
-    assert pruned.equals(full.filter(pl.col("rows") >= min_rows))
+    expected = full.filter(pl.col("rows") >= min_rows)
+    assert pruned.schema == expected.schema
+    # Same rows and order, every column exact except ``ratio``: polars 2.0.0 can divide one ulp
+    # differently on a filtered frame than on a fresh one (the pruned path rolls up subsets).
+    assert_matches_oracle(pruned.rows(), expected.rows())
 
 
 @PROFILE

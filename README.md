@@ -155,19 +155,37 @@ order, then the cell's values ascending as strings with nulls last. An empty inp
    from the raw rows. Sums are additive, so roll-ups are exact.
 2. **Roll-ups.** For each cut, group the finest-grain table by the cut's columns and sum the
    three measures.
-3. **Anti-monotone pruning (`min_rows > 1`).** Cuts are computed level by level (size 1, 2, ...).
-   For a k-cut, the finest-grain table is semi-joined against the frequent cells of each of its
-   (k-1)-sub-cuts (nulls compare equal, so a missing value is a cell of its own), so only
-   finest-grain groups all of whose sub-cells reached `min_rows` are rolled up. Further shortcuts:
-   a cut is skipped when any of its (k-1)-sub-cuts has no frequent cell; the level loop stops as
-   soon as a level has no frequent cell; and if `min_rows` exceeds the total row count nothing is
-   computed. Size-1 cuts are never restricted. With `min_rows == 1` no pruning is done.
+3. **Anti-monotone pruning (`min_rows > 1`).** The cuts are walked depth first through the
+   set-enumeration tree: a cut's children add one dimension that comes *before* its first one in
+   the dimension list. This preorder (colexicographic) visits every subset of a cut before the cut
+   itself. A child is skipped, with its whole subtree, when any of its (k-1)-sub-cuts has no
+   frequent cell; that test is a few set lookups, so no candidate cut is generated except as a
+   child of a frequent one, and there is no C(n, k) enumeration. Every sub-cut of a child other
+   than its parent precedes the parent, so a frequent cut knows its candidate children before
+   visiting any of them; if it has some, it hands them a source restricted to the columns of the
+   dimensions those children add (all its subtree can read) and to its own frequent cells (one
+   semi-join, nulls compare equal so a missing value is a cell of its own). The children roll up
+   that smaller source instead of the whole finest-grain table. A semi-join costs about as much as
+   a roll-up of the same source, so it is made only when the source rows it drops, times the
+   number of candidate children, reach the size of the source; otherwise the children read the
+   unrestricted rows and a deeper cut drops them. A cut with no candidate child makes no
+   semi-join. At most `max_dims` restricted sources are alive at once. Per-cut results are
+   buffered and assembled in the documented order at the end. If `min_rows` exceeds the total row
+   count nothing is computed. With `min_rows == 1` nothing is pruned or restricted: every cut rolls
+   up from the finest-grain table.
 
 Complexity notes: with `n` dimensions and `max_dims = m` there are `sum(C(n, k) for k in 1..m)`
 cuts (511 for n = 9, m = 9). The number of cells in a cut is bounded by the number of distinct
-value combinations of its dimensions, and the total work is bounded by cuts times the size of the
-finest-grain table, which is at most the number of input rows and in practice much smaller for
-low-cardinality dimensions. Pruning shrinks the table each cut reads as `min_rows` grows.
+value combinations of its dimensions, and the exhaustive work is bounded by cuts times the size of
+the finest-grain table, which is at most the number of input rows and in practice much smaller for
+low-cardinality dimensions. With `min_rows > 1` the work follows the output instead: a cut costs
+one roll-up of its parent's restricted source plus at most one semi-join, only cuts whose every
+sub-cut is frequent are rolled up (plus one cheap lookup per dimension for each frequent cut), and
+memory is the finest-grain table, at most `max_dims` restricted copies of it, and the output. On 50
+dimensions of which 10 are binary and 40 have 5,000 values, 80,000 rows and `min_rows=100`
+(1,022 frequent cuts, every subset of the binary dimensions up to 9 of them; 58,024 cells) it
+takes about 2 s and 0.4 GB. `benchmarks/pruning.py` reproduces these numbers
+(`uv run python benchmarks/pruning.py`; not part of the test run).
 
 ## Results on the survey data
 
@@ -191,8 +209,14 @@ reading, join and cube; excludes writing output), polars on a laptop, three runs
 
 | Run | Output rows | Time | Peak RSS |
 | --- | ---: | ---: | ---: |
-| all 9 dims, `min_rows=1` | 1,546,271 | 0.6 s | about 415 MB |
-| all 9 dims, `--min-rows 30` | 11,706 | 0.5 s | about 135 MB |
+| all 9 dims, `min_rows=1` | 1,546,271 | 0.6 s | about 375 MB |
+| all 9 dims, `--min-rows 2` | 568,579 | 0.5 s | about 205 MB |
+| all 9 dims, `--min-rows 30` | 11,706 | 0.25 s | about 130 MB |
+| all 9 dims, `--min-rows 100` | 2,447 | 0.17 s | about 125 MB |
+
+Compared with computing the whole cube and filtering (0.55 s, about 690 MB for the cube step
+alone), the thresholded run is about 1.2x faster at `--min-rows 2` and about 1.6x, 3x and 5x
+faster at 5, 30 and 100 (`benchmarks/pruning.py`, best of three runs).
 
 With `--min-rows 30` the largest surviving cut has 6 dimensions (cells per cut size 1..6: 135,
 1,517, 4,212, 4,192, 1,526, 124). Absolute numbers depend on the machine, core count and polars
@@ -239,7 +263,7 @@ uv sync
 uv run pytest
 uv run ruff check
 uv run ruff format --check
-uv run mypy src tests
+uv run mypy src tests benchmarks
 ```
 
 The code targets Python 3.15 and uses: PEP 810 explicit lazy imports (`lazy import polars as
@@ -248,11 +272,12 @@ evaluation (no `from __future__ import annotations`).
 
 ```
 src/child_mortality/
-    cube.py       ratio_cube: validation, pre-aggregation, roll-ups, pruning
+    cube.py       ratio_cube: validation, pre-aggregation, roll-ups, pruning walk
     survey.py     CSV loaders, women-household join, cd_ceb_cube, survey constants
     cli.py        argparse CLI (cd-ceb, ratio-cube)
     __main__.py   python -m child_mortality
 tests/            pytest suite
+benchmarks/       pruning.py: time and peak RSS vs compute-all-then-filter (not run by pytest)
 data/             DHS model dataset CSVs
 docs/             RELEASING.md
 .github/workflows/  ci.yml, release.yml
